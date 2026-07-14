@@ -186,10 +186,11 @@
   var TickCount = 5;             // number of tick marks on the ground line (plain mode only)
   var TickLength = 10;           // length of each tick mark, in px
 
-  // Route lines drawn when a route button is selected (plain mode)
-  var RouteLineWidth = 5;        // stroke width of route lines
-  var RouteLineStart = 0.009;    // left end, as a fraction of window width
+  // Route lines drawn when a route button is selected
+  var RouteLineWidth = 5;        // route line thickness (normal)
+  var RouteLineWidthThin = 2;    // route line thickness while "Internet Connection" is on
   var RouteLineEnd = 0.868;      // right end, as a fraction of window width
+                                 // (left end is always LeftMargin, shared with station mode)
   var PlaneSlots = [0.74, 0.52]; // plane line height, as a fraction of the sky (from top)
   var SubwaySlots = [0.28, 0.75];// subway line depth, as a fraction of the ground
 
@@ -197,7 +198,7 @@
   var LeftMargin = 140;          // px gap from the left screen edge to the first station
   var RightPadding = 140;        // px kept to the right of the last station
   var StationSpacing = 150;      // px between stations (equidistant for now)
-  var StationRadius = 6;         // station dot radius, in px
+  var StationRadius = 3;         // station dot radius, in px (halved)
   var SquareSize = 14;           // signal square side, in px
   // =================================================
 
@@ -275,12 +276,16 @@
     b.className = "source-btn";
     b.textContent = label;
     b.addEventListener("click", function () {
-      b.classList.toggle("selected");
-      if (label === "Internet Connection") {
-        stationMode = b.classList.contains("selected");
-        legend.classList.toggle("on", stationMode);
-        draw();
-      }
+      var willSelect = !b.classList.contains("selected");
+      // Single-select: clear every option, then select this one (if it was off)
+      Array.prototype.forEach.call(sourceBox.children, function (el) {
+        el.classList.remove("selected");
+      });
+      if (willSelect) b.classList.add("selected");
+      // Station mode is on only when "Internet Connection" is the selected option
+      stationMode = willSelect && label === "Internet Connection";
+      legend.classList.toggle("on", stationMode);
+      draw();
     });
     sourceBox.appendChild(b);
   });
@@ -334,28 +339,31 @@
 
   // A selected route in plain mode: a single colored line
   function renderPlainLine(r, y, w) {
-    return hline(w * RouteLineStart, y, w * RouteLineEnd, r.color, RouteLineWidth);
+    return hline(LeftMargin, y, w * RouteLineEnd, r.color,
+                 stationMode ? RouteLineWidthThin : RouteLineWidth);
   }
 
-  // A selected route in station mode: dots, station signals, track signals, labels
+  // A selected route in station mode. Draw order controls layering:
+  // signal squares first (underneath), then the line, then dots + labels (on top).
   function renderStationRoute(r, y, data) {
     var N = data.order.length;
-    var s = hline(stationX(0), y, stationX(N - 1), r.color, RouteLineWidth);
+    var squares = "";   // bottom layer
+    var marks = "";     // dots + labels, top layer
 
     for (var i = 0; i < N; i++) {
       var id = data.order[i];
       var x = stationX(i);
 
-      // Station signals: one square per data row, stacked directly above the dot
+      // Station signals: stacked, bottom edge on the line
       var sig = data.stations[id] || [];
       for (var k = 0; k < sig.length; k++) {
         var c = SignalColors[sig[k]];
         if (!c) continue;
-        var yTop = y - (StationRadius + 3) - (sig.length - k) * SquareSize;
-        s += rect(x - SquareSize / 2, yTop, c);
+        var yTop = y - (sig.length - k) * SquareSize;
+        squares += rect(x - SquareSize / 2, yTop, c);
       }
 
-      // Track signals: evenly distributed between this station and the next
+      // Track signals: evenly distributed between stations, bottom edge on the line
       if (i < N - 1) {
         var tr = data.tracks[id] || [];
         var xNext = stationX(i + 1);
@@ -363,22 +371,25 @@
           var tc = SignalColors[tr[j]];
           if (!tc) continue;
           var tx = x + (xNext - x) * (j + 1) / (tr.length + 1);
-          s += rect(tx - SquareSize / 2, y - SquareSize / 2, tc);
+          squares += rect(tx - SquareSize / 2, y - SquareSize, tc);
         }
       }
 
       // Station dot (hollow circle in the route's color)
-      s += '<circle cx="' + x + '" cy="' + y + '" r="' + StationRadius +
-           '" fill="' + White + '" stroke="' + r.color + '" stroke-width="2"></circle>';
+      marks += '<circle cx="' + x + '" cy="' + y + '" r="' + StationRadius +
+               '" fill="' + White + '" stroke="' + r.color + '" stroke-width="2"></circle>';
 
       // Station label
       var name = StationNames[id];
       if (name) {
-        s += '<text x="' + x + '" y="' + (y + StationRadius + 20) +
-             '" text-anchor="middle">' + name + '</text>';
+        marks += '<text x="' + x + '" y="' + (y + StationRadius + 20) +
+                 '" text-anchor="middle">' + name + '</text>';
       }
     }
-    return s;
+
+    var line = hline(stationX(0), y, stationX(N - 1), r.color,
+                     stationMode ? RouteLineWidthThin : RouteLineWidth);
+    return squares + line + marks;
   }
 
   // ----- Draw the scene -----
