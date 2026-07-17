@@ -1,0 +1,84 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "Inter", system-ui, sans-serif;
+  color: #1a1a1a;
+}
+
+header {
+  background: #1B1B33;
+  color: white;
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  align-items: baseline;
+  gap: 1.5rem;
+}
+
+header h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+#status {
+  color: #a0a0c0;
+  font-size: 0.85rem;
+}
+
+#map {
+  position: absolute;
+  top: 46px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+#legend {
+  position: absolute;
+  top: 60px;
+  right: 12px;
+  background: rgba(255,255,255,0.95);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  font-size: 0.85rem;
+  z-index: 10;
+  min-width: 150px;
+}
+
+.legend-title {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+#legend label {
+  display: block;
+  padding: 0.15rem 0;
+  cursor: pointer;
+}
+
+.legend-note {
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #eee;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.maplibregl-popup-content {
+  font-size: 0.85rem;
+  padding: 0.6rem 0.9rem;
+}
+
+.route-chip {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  color: white;
+  font-weight: 700;
+  text-align: center;
+  line-height: 22px;
+  font-size: 0.75rem;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}

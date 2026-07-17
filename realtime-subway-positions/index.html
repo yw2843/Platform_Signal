@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NYC Subway: Live Positions</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" />
+  <link rel="stylesheet" href="assets/css/style.css" />
+</head>
+<body>
+
+  <header>
+    <h1>NYC Subway: Live Positions</h1>
+    <p id="status">Loading feeds...</p>
+  </header>
+
+  <div id="map"></div>
+
+  <div id="legend">
+    <div class="legend-title">Feed groups</div>
+    <label><input type="checkbox" data-feed="l" checked /> L</label>
+    <label><input type="checkbox" data-feed="ace" checked /> A C E</label>
+    <label><input type="checkbox" data-feed="nqrw" checked /> N Q R W</label>
+    <label><input type="checkbox" data-feed="123456" checked /> 1 2 3 4 5 6 7 S</label>
+    <label><input type="checkbox" data-feed="bdfm" /> B D F M</label>
+    <label><input type="checkbox" data-feed="g" /> G</label>
+    <label><input type="checkbox" data-feed="jz" /> J Z</label>
+    <div class="legend-note">Updates every 15 seconds.</div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/protobufjs@7.2.5/dist/protobuf.min.js"></script>
+  <script src="assets/js/gtfs-realtime.proto.js"></script>
+  <script src="assets/js/mta.js"></script>
+</body>
+</html>
