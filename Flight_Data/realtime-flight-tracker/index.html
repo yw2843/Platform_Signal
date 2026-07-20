@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Near-real-time probable and confirmed LaGuardia flight tracker.">
+  <title>LGA Realtime Flight Tracker</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="app">
+    <div id="map" aria-label="LaGuardia real-time flight map"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="eyebrow">LaGuardia · KLGA</span>
+        <h1>Realtime Flight Tracker</h1>
+      </div>
+      <div class="topbar-actions">
+        <div class="connection" id="connection" title="OpenSky connection status">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-label">Starting</span>
+        </div>
+        <div class="mode-toggle" role="group" aria-label="Map view mode">
+          <button class="mode-button active" id="plan-button" type="button" aria-pressed="true">Plan</button>
+          <button class="mode-button" id="three-d-button" type="button" aria-pressed="false">3D</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="legend" aria-label="Flight status legend">
+      <div><span class="legend-line probable"></span>Probable</div>
+      <div><span class="legend-line confirmed"></span>Confirmed</div>
+      <div><span class="boundary-symbol"></span>40 NM rule boundary</div>
+    </section>
+
+    <section class="map-summary" aria-live="polite">
+      <div><strong id="confirmed-count">0</strong><span>confirmed</span></div>
+      <div><strong id="probable-count">0</strong><span>probable</span></div>
+      <div><strong id="last-update">—</strong><span>last OpenSky update</span></div>
+    </section>
+
+    <aside class="details-panel" id="details-panel" aria-hidden="true" aria-label="Selected flight details">
+      <div class="details-header">
+        <div>
+          <span class="eyebrow" id="details-status">Selected flight</span>
+          <h2 id="details-callsign">—</h2>
+        </div>
+        <button id="details-close" class="close-button" type="button" aria-label="Close flight details">×</button>
+      </div>
+      <div class="details-route" id="details-route">—</div>
+      <table class="details-table">
+        <tbody id="details-body"></tbody>
+      </table>
+      <p class="details-note" id="details-note"></p>
+    </aside>
+
+    <div class="loading-card" id="loading-card">
+      <span class="spinner"></span>
+      <span>Waiting for OpenSky data…</span>
+    </div>
+
+    <div class="map-message" id="map-message" role="status"></div>
+  </main>
+
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/deck.gl@9.3.7/dist.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
