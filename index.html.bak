@@ -249,7 +249,6 @@
   var Signal_1   = "#f2e6b8";   // signal value 1 (yellow / medium)
   var Signal_2   = "#bcd4a8";   // signal value 2 (green / strong)
   var Subway_456 = "#00933C";   // live train dots for the 4/5/6 group (official MTA green)
-  var SpindleColor_Gold   = "#ffb347";   // signal spindle contour lines (warm gold, brightness follows signal strength)
   // =================================================
 
   var SignalColors = { 0: Signal_0, 1: Signal_1, 2: Signal_2 };
@@ -374,7 +373,6 @@
       stationMode = willSelect && label === "Internet Connection";
       legend.classList.toggle("on", stationMode);
       draw();
-      if (!stationMode) { activeSpindleTripId = null; clearSpindleSegment(); }   // leaving Internet Connection hides any shown spindle segment
     });
     sourceBox.appendChild(b);
   });
@@ -705,7 +703,6 @@
   // This map is created only when 3D View is first opened. Plan View keeps
   // its existing raster basemap and camera behavior.
   var ThreeDStyleUrl = "https://tiles.openfreemap.org/styles/liberty";
-  var ThreeDDarkenAmount = 0.55;   // opacity of the dark scrim over the basemap (0 = untouched, 1 = black)
   var threeDMap = null;
   var threeDMapReady = false;
   var threeDRouteLayerOnById = {};
@@ -769,18 +766,10 @@
           "fill-extrusion-opacity": 0.88
         }
       }, labelLayerId);
-      // Dark scrim: a full-canvas semi-transparent layer added here (after the basemap +
-      // buildings, before the route/train/spindle layers below) darkens only the map itself --
-      // anything added after this point still renders at full brightness on top of it.
-      threeDMap.addLayer({
-        id: "dark-scrim",
-        type: "background",
-        paint: { "background-color": NA, "background-opacity": ThreeDDarkenAmount }
-      });
       threeDMapReady = true;
       syncAllThreeDRouteLayers();
       initThreeDTrainsLayer();
-      loadSpindleData();
+      initSignalSpindleLayer();
     });
   }
 
@@ -918,20 +907,11 @@
       }
     });
     threeDMap.on("click", "three-d-live-trains", function (e) {
-      var f = e.features[0];
-      var p = f.properties;
+      var p = e.features[0].properties;
       new maplibregl.Popup()
         .setLngLat(e.lngLat)
         .setHTML("<strong>" + p.route + " train</strong><br/>Next stop: " + p.nextStop)
         .addTo(threeDMap);
-      // Clicking an L train, while L + Internet Connection are both selected, reveals the
-      // signal spindle for just the 500m on either side of that train (see Signal Spindle below).
-      // Tracked by tripId so refreshTrains() can keep the spindle glued to this same train as
-      // it moves on each poll.
-      if (p.route === "L" && stationMode && selectedRoutes.L) {
-        activeSpindleTripId = p.tripId;
-        showSpindleSegment(f.geometry.coordinates);
-      }
     });
     ensureTrainPolling();
   }
@@ -977,7 +957,7 @@
       features.push({
         type: "Feature",
         geometry: { type: "Point", coordinates: [stop.lon, stop.lat] },
-        properties: { route: t.routeId, tripId: t.tripId, color: TrainColors[t.routeId] || NA, nextStop: stop.name }
+        properties: { route: t.routeId, color: TrainColors[t.routeId] || NA, nextStop: stop.name }
       });
     });
     return { type: "FeatureCollection", features: features };
@@ -998,105 +978,42 @@
         if (source) source.setData(geojson);
         var threeDSource = threeDMap && threeDMap.getSource("three-d-live-trains");
         if (threeDSource) threeDSource.setData(geojson);
-
-        // Keep the spindle glued to whichever train it was opened for, if that train is
-        // still running: re-anchor it to the train's freshly-polled position. If the train
-        // has dropped out of the feed (finished its run), clear the spindle.
-        if (activeSpindleTripId) {
-          var stillRunning = geojson.features.filter(function (f) {
-            return f.properties.tripId === activeSpindleTripId;
-          })[0];
-          if (stillRunning) {
-            showSpindleSegment(stillRunning.geometry.coordinates);
-          } else {
-            activeSpindleTripId = null;
-            clearSpindleSegment();
-          }
-        }
       })
       .catch(function () { /* feed(s) unavailable this cycle */ });
   }
   // ======================================================================
 
   // ===================== Signal Spindle (3D View only) =====================
-  // Clicking an L train (while L + Internet Connection are both selected -- see the
-  // "three-d-live-trains" click handler above) reveals a tube draped along the real L-line
-  // path (RouteShape/NYCSubways/Subway_L.geojson), covering just SpindleWindowM on either
-  // side of that train. Radius at each cross-section tracks normalized signal strength
-  // directly (no tapering envelope), so the cut ends of the window are flat/open rather
-  // than pinching to a point. Data: Source/Subway_Signal_Strength/subway-web-100.min.json
-  // (L line, AVERAGE provider).
+  // A tube draped along the real L-line path (RouteShape/NYCSubways/Subway_L.geojson),
+  // whose cross-section radius at each of the signal dataset's 100 sample points is:
+  //   spindle envelope (0 at both ends, 1 at the middle) x normalized signal strength
+  // so the whole object still reads as a spindle, but bulges/pinches with real signal data
+  // from Source/Subway_Signal_Strength/subway-web-100.min.json (L line, AVERAGE provider).
   var SpindleSourceGeoJson = "RouteShape/NYCSubways/Subway_L.geojson";
   var SpindleSignalJson = "Source/Subway_Signal_Strength/subway-web-100.min.json";
   var SpindleProvider = "AVERAGE";
-  var SpindleWindowM = 500;          // shown length on EACH side of the clicked train
-  var SpindleMaxRadiusM = 500;       // radius at full signal strength, in meters
+  var SpindleMaxRadiusM = 25;        // radius at full signal strength, in meters
   var SpindleMinRadiusFactor = 0.08; // radius floor (as a fraction of SpindleMaxRadiusM) so weak-signal sections don't pinch to a hairline
-  var SpindleTubeSegments = 10;      // number of flowing longitudinal contour strands around the tube
-  var SpindleSamplesPerWindow = 60;  // cross-sections drawn across the whole shown window
-  var SpindleRingContourEvery = 6;   // draw a faint full ring contour every Nth cross-section
-  var SpindleMaxTurnFraction = 0.85; // cap radius at this fraction of the local turning radius, so the
-                                      // tube can never be wider than a bend allows -- keeps contour
-                                      // strands from crossing through their own inside edge on sharp turns
-  // Contour strands/rings are drawn as thin 3D tubes rather than native GL lines, because
-  // WebGL line width is capped at 1px on most platforms. Radius chosen so the strand reads
-  // as ~70% as thick as the L-route line (line-width: 6px in syncThreeDRouteLayer), using
-  // Web Mercator meters-per-pixel at a representative close-in zoom (16, ~NYC latitude):
-  // 0.7 * 6px * 1.81 m/px / 2 (px -> radius) ~= 3.8m.
-  var SpindleLineThicknessM = 3.8;   // glow-line tube radius, in meters
-  var SpindleLineRadialSegments = 6; // roundness of each glow-line tube's own cross-section
+  var SpindleTubeSegments = 16;      // circular cross-section resolution
   var SpindleBurialDepthM = 0;       // how far below street level the centerline sits.
                                       // 0 = flush with the ground (drape mode). Update this
                                       // once real subway burial-depth data is available.
+  var signalSpindleReady = false;
 
-  var SpindleData = null;        // { lonLat, localPts, cum, totalLen, signalValues, maxSignal, mPerDegLon, mPerDegLat }
-  var spindleDataLoading = false;
-  var activeSpindleTripId = null;   // tripId of the train the shown spindle is glued to, if any
-
-  function loadSpindleData() {
-    if (SpindleData || spindleDataLoading) return;
-    spindleDataLoading = true;
+  function initSignalSpindleLayer() {
+    if (signalSpindleReady) return;
+    signalSpindleReady = true;
     Promise.all([
       fetch(SpindleSourceGeoJson).then(function (r) { return r.json(); }),
       fetch(SpindleSignalJson).then(function (r) { return r.json(); })
     ]).then(function (results) {
       var pathGeojson = reprojectGeoJson(results[0]);   // EPSG:2263 -> WGS84
-      var lonLat = pathCoordsFromGeoJson(pathGeojson);
-      // The GeoJSON's own vertex order runs Canarsie -> 8 Av, but the signal dataset's
-      // position/milepost convention (stationNames.L) runs 8 Av (position 0) -> Canarsie
-      // (position ~1). Reverse the path so distance-along-path 0 lines up with signal
-      // index 0, or the two are exactly backwards (confirmed against real station data).
-      lonLat.reverse();
       var segs = results[1].HiRes.providerLogs.L[SpindleProvider];   // {0:{signal}, 1:{signal}, ...}
       var signalValues = [];
       var i = 0;
       while (segs[i] !== undefined) { signalValues.push(segs[i].signal); i++; }
-
-      // Local flat-earth meters: east = +lon, south = -lat (matches MercatorCoordinate's
-      // own x/y sign convention directly, so the map transform needs no extra rotation).
-      var latRef = lonLat[Math.floor(lonLat.length / 2)][1];
-      var mPerDegLat = 111320;
-      var mPerDegLon = 111320 * Math.cos(latRef * Math.PI / 180);
-      var localPts = lonLat.map(function (pt) { return [pt[0] * mPerDegLon, -pt[1] * mPerDegLat]; });
-
-      var cum = [0];
-      for (var j = 1; j < localPts.length; j++) {
-        var dx = localPts[j][0] - localPts[j - 1][0];
-        var dy = localPts[j][1] - localPts[j - 1][1];
-        cum.push(cum[j - 1] + Math.sqrt(dx * dx + dy * dy));
-      }
-
-      var maxSignal = 0;
-      signalValues.forEach(function (v) { if (v > maxSignal) maxSignal = v; });
-      if (maxSignal <= 0) maxSignal = 100;
-
-      SpindleData = {
-        lonLat: lonLat, localPts: localPts, cum: cum, totalLen: cum[cum.length - 1],
-        signalValues: signalValues, maxSignal: maxSignal,
-        mPerDegLon: mPerDegLon, mPerDegLat: mPerDegLat
-      };
-    }).catch(function (err) { console.error("Signal spindle data failed to load:", err); })
-      .then(function () { spindleDataLoading = false; });
+      buildSignalSpindle(pathGeojson, signalValues);
+    }).catch(function (err) { console.error("Signal spindle failed to load:", err); });
   }
 
   function pathCoordsFromGeoJson(geojson) {
@@ -1107,190 +1024,112 @@
     return coords;
   }
 
-  // Point (in local east/south meters) at an arbitrary distance along the path, plus its unit tangent.
-  function pointAtDistance(d) {
-    var cum = SpindleData.cum, localPts = SpindleData.localPts;
-    var i = 1;
-    while (i < cum.length - 1 && cum[i] < d) i++;
-    var d0 = cum[i - 1], d1 = cum[i];
-    var t = d1 > d0 ? (d - d0) / (d1 - d0) : 0;
-    var p0 = localPts[i - 1], p1 = localPts[i];
-    var east = p0[0] + (p1[0] - p0[0]) * t;
-    var south = p0[1] + (p1[1] - p0[1]) * t;
-    var tE = p1[0] - p0[0], tS = p1[1] - p0[1];
-    var tl = Math.sqrt(tE * tE + tS * tS) || 1;
-    return { east: east, south: south, tE: tE / tl, tS: tS / tl };
-  }
+  function buildSignalSpindle(pathGeojson, signalValues) {
+    var lonLat = pathCoordsFromGeoJson(pathGeojson);
+    if (lonLat.length < 2 || !signalValues.length) return;
 
-  // Signal strength at an arbitrary distance along the line, linearly interpolated between
-  // the dataset's 100 fixed sample points (each at fraction i/99 of the total length).
-  function signalAtDistance(d) {
-    var vals = SpindleData.signalValues;
-    var Nv = vals.length;
-    var frac = Math.max(0, Math.min(1, d / SpindleData.totalLen)) * (Nv - 1);
-    var i0 = Math.floor(frac), i1 = Math.min(Nv - 1, i0 + 1);
-    var t = frac - i0;
-    return vals[i0] + (vals[i1] - vals[i0]) * t;
-  }
+    // Local flat-earth meters: east = +lon, south = -lat (matches MercatorCoordinate's
+    // own x/y sign convention directly, so the map transform needs no extra rotation).
+    var latRef = lonLat[Math.floor(lonLat.length / 2)][1];
+    var mPerDegLat = 111320;
+    var mPerDegLon = 111320 * Math.cos(latRef * Math.PI / 180);
+    function toEastSouth(pt) { return [pt[0] * mPerDegLon, -pt[1] * mPerDegLat]; }
+    var localPts = lonLat.map(toEastSouth);
 
-  // Nearest distance-along-path to an arbitrary [lon, lat] -- used to locate a clicked train.
-  function nearestDistanceAlongPath(lonLatPt) {
-    var east = lonLatPt[0] * SpindleData.mPerDegLon;
-    var south = -lonLatPt[1] * SpindleData.mPerDegLat;
-    var localPts = SpindleData.localPts, cum = SpindleData.cum;
-    var bestDist2 = Infinity, bestAlong = 0;
+    var cum = [0];
     for (var i = 1; i < localPts.length; i++) {
+      var dx = localPts[i][0] - localPts[i - 1][0];
+      var dy = localPts[i][1] - localPts[i - 1][1];
+      cum.push(cum[i - 1] + Math.sqrt(dx * dx + dy * dy));
+    }
+    var totalLen = cum[cum.length - 1];
+
+    function pointAtDistance(d) {
+      var i = 1;
+      while (i < cum.length - 1 && cum[i] < d) i++;
+      var d0 = cum[i - 1], d1 = cum[i];
+      var t = d1 > d0 ? (d - d0) / (d1 - d0) : 0;
       var p0 = localPts[i - 1], p1 = localPts[i];
-      var ex = p1[0] - p0[0], ey = p1[1] - p0[1];
-      var segLen2 = ex * ex + ey * ey || 1;
-      var t = Math.max(0, Math.min(1, ((east - p0[0]) * ex + (south - p0[1]) * ey) / segLen2));
-      var px = p0[0] + ex * t, py = p0[1] + ey * t;
-      var dx = east - px, dy = south - py;
-      var d2 = dx * dx + dy * dy;
-      if (d2 < bestDist2) { bestDist2 = d2; bestAlong = cum[i - 1] + Math.sqrt(segLen2) * t; }
-    }
-    return bestAlong;
-  }
-
-  // Builds and shows the spindle for SpindleWindowM on either side of the given [lon, lat].
-  // Replaces any previously shown segment (only one is ever shown at a time).
-  function showSpindleSegment(lonLatPt) {
-    if (!SpindleData) return;
-    var centerDist = nearestDistanceAlongPath(lonLatPt);
-    var start = Math.max(0, centerDist - SpindleWindowM);
-    var end = Math.min(SpindleData.totalLen, centerDist + SpindleWindowM);
-    if (end <= start) return;
-
-    var N = SpindleSamplesPerWindow;
-    var samples = [], signals = [];
-    for (var s = 0; s < N; s++) {
-      var d = start + (end - start) * (s / (N - 1));
-      samples.push(pointAtDistance(d));
-      signals.push(signalAtDistance(d));
+      var east = p0[0] + (p1[0] - p0[0]) * t;
+      var south = p0[1] + (p1[1] - p0[1]) * t;
+      var tE = p1[0] - p0[0], tS = p1[1] - p0[1];
+      var tl = Math.sqrt(tE * tE + tS * tS) || 1;
+      return { east: east, south: south, tE: tE / tl, tS: tS / tl };
     }
 
-    var maxSignal = SpindleData.maxSignal;
-    function normSignal(s) { return Math.max(0, Math.min(1, signals[s] / maxSignal)); }
+    var N = signalValues.length;
+    var samples = [];
+    for (var s = 0; s < N; s++) samples.push(pointAtDistance((s / (N - 1)) * totalLen));
 
-    // Flat-ended: no tapering envelope -- radius follows signal strength alone, so the cut
-    // ends of the window are open/flat rather than pinching to a point.
-    var radius = [];
-    for (var s = 0; s < N; s++) {
+    var maxSignal = 0;
+    signalValues.forEach(function (v) { if (v > maxSignal) maxSignal = v; });
+    if (maxSignal <= 0) maxSignal = 100;
+
+    function normSignal(s) { return Math.max(0, Math.min(1, signalValues[s] / maxSignal)); }
+    function radiusAt(s) {
+      var t = s / (N - 1);
+      var envelope = Math.sin(Math.PI * t);   // 0 at both ends, 1 at the middle -- the spindle silhouette
       var strength = SpindleMinRadiusFactor + (1 - SpindleMinRadiusFactor) * normSignal(s);
-      radius.push(strength * SpindleMaxRadiusM);
+      return envelope * strength * SpindleMaxRadiusM;
     }
 
-    // Clamp radius by local turning radius: on a bend, a cross-section wider than the bend
-    // itself would have its inside edge cross past the path's own centerline -- which is
-    // exactly what makes contour strands visually cross each other through a tight turn.
-    // Capping each radius at a fraction of the local curve radius keeps every cross-section
-    // inside what the bend can actually support.
-    var stepLen = (end - start) / (N - 1);
-    for (var s2 = 1; s2 < N - 1; s2++) {
-      var a0 = samples[s2 - 1], a1 = samples[s2 + 1];
-      var cosAngle = Math.max(-1, Math.min(1, a0.tE * a1.tE + a0.tS * a1.tS));
-      var turnAngle = Math.acos(cosAngle);
-      if (turnAngle > 0.001) {
-        var curveRadius = (2 * stepLen) / turnAngle;
-        radius[s2] = Math.min(radius[s2], curveRadius * SpindleMaxTurnFraction);
-      }
-    }
-
-    var origin = samples[Math.floor(N / 2)];
-    var originLonLat = [origin.east / SpindleData.mPerDegLon, -origin.south / SpindleData.mPerDegLat];
+    var origin = samples[0];
+    var originLonLat = lonLat[0];
     var segsAround = SpindleTubeSegments;
+    var positions = [];
+    var colors = [];
+    var weak = new THREE.Color(Signal_0), strong = new THREE.Color(Signal_2);
 
-    // Every cross-section ring, in local (east, south, altitude) meters relative to origin.
-    var ringVerts = [];
-    for (var s3 = 0; s3 < N; s3++) {
-      var c = samples[s3];
-      var r = radius[s3];
+    for (var s2 = 0; s2 < N; s2++) {
+      var c = samples[s2];
+      var r = radiusAt(s2);
       var right = [c.tS, -c.tE];   // horizontal, perpendicular to tangent (east/south plane)
       var centerEast = c.east - origin.east;
       var centerSouth = c.south - origin.south;
       var centerAlt = -SpindleBurialDepthM;
-      var ring = [];
+      var col = weak.clone().lerp(strong, normSignal(s2));
+
       for (var a = 0; a < segsAround; a++) {
         var ang = (a / segsAround) * Math.PI * 2;
         var offH = Math.cos(ang) * r;
         var offV = Math.sin(ang) * r;
         // local frame matches MercatorCoordinate directly: X=east, Y=south, Z=altitude(up)
-        ring.push([centerEast + right[0] * offH, centerSouth + right[1] * offH, centerAlt + offV]);
+        positions.push(
+          centerEast + right[0] * offH,
+          centerSouth + right[1] * offH,
+          centerAlt + offV
+        );
+        colors.push(col.r, col.g, col.b);
       }
-      ringVerts.push(ring);
     }
 
-    var group = new THREE.Group();
-    var gold = new THREE.Color(SpindleColor_Gold);
-
-    // Flowing longitudinal contour strands -- one per angular position, running the length
-    // of the window. This is the "contour line" look: many thin glowing tubes tracing the
-    // tube's surface, brightening/dimming with signal strength along the way.
-    for (var a2 = 0; a2 < segsAround; a2++) {
-      var strandPts = [], strandBrightness = [];
-      for (var s4 = 0; s4 < N; s4++) {
-        var v = ringVerts[s4][a2];
-        strandPts.push(new THREE.Vector3(v[0], v[1], v[2]));
-        strandBrightness.push(0.35 + 0.65 * normSignal(s4));
+    var indices = [];
+    for (var s3 = 0; s3 < N - 1; s3++) {
+      for (var a2 = 0; a2 < segsAround; a2++) {
+        var a3 = (a2 + 1) % segsAround;
+        var i0 = s3 * segsAround + a2, i1 = s3 * segsAround + a3;
+        var i2 = (s3 + 1) * segsAround + a2, i3 = (s3 + 1) * segsAround + a3;
+        indices.push(i0, i2, i1, i1, i2, i3);
       }
-      group.add(buildGlowTube(strandPts, strandBrightness, gold, false, 0.85));
     }
 
-    // Sparse ring contours -- literal iso-radius rings, every SpindleRingContourEvery
-    // cross-sections, to reinforce the "contour line" reading.
-    for (var s5 = 0; s5 < N; s5 += SpindleRingContourEvery) {
-      var ring2 = ringVerts[s5];
-      var ringPts = [], ringBrightness = [];
-      for (var a3 = 0; a3 < segsAround; a3++) {
-        ringPts.push(new THREE.Vector3(ring2[a3][0], ring2[a3][1], ring2[a3][2]));
-        ringBrightness.push(0.35 + 0.65 * normSignal(s5));
-      }
-      group.add(buildGlowTube(ringPts, ringBrightness, gold, true, 0.3));
-    }
+    var geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
 
-    addThreeJsLayerToMap(originLonLat, group);
-  }
-
-  // A thin glowing "line" rendered as a real tube (native GL line width is capped at 1px on
-  // most platforms, so this is what actually gives it controllable thickness). `brightness`
-  // is one 0..1 value per point in `points`, applied as a per-ring color multiplier so the
-  // strand still visibly brightens/dims along its length with signal strength.
-  function buildGlowTube(points, brightness, baseColor, closed, opacity) {
-    var curve = new THREE.CatmullRomCurve3(points, closed);
-    var tubularSegments = closed ? points.length : points.length - 1;
-    var geometry = new THREE.TubeGeometry(
-      curve, tubularSegments, SpindleLineThicknessM, SpindleLineRadialSegments, closed
-    );
-
-    var posAttr = geometry.attributes.position;
-    var ringVertCount = SpindleLineRadialSegments + 1;
-    var colors = new Float32Array(posAttr.count * 3);
-    for (var vi = 0; vi < posAttr.count; vi++) {
-      var ringIdx = Math.min(brightness.length - 1, Math.floor(vi / ringVertCount));
-      var c = baseColor.clone().multiplyScalar(brightness[ringIdx]);
-      colors[vi * 3] = c.r; colors[vi * 3 + 1] = c.g; colors[vi * 3 + 2] = c.b;
-    }
-    geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-
-    var material = new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: opacity,
-      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+    var material = new THREE.MeshStandardMaterial({
+      vertexColors: true, metalness: 0.15, roughness: 0.55, side: THREE.DoubleSide
     });
-    return new THREE.Mesh(geometry, material);
-  }
-
-  function clearSpindleSegment() {
-    if (threeDMap && threeDMap.getLayer && threeDMap.getLayer("signal-spindle-3d")) {
-      threeDMap.removeLayer("signal-spindle-3d");
-    }
+    addThreeJsLayerToMap(originLonLat, new THREE.Mesh(geometry, material));
   }
 
   // Bridges a Three.js scene into a MapLibre custom WebGL layer. Because the spindle's
   // geometry is already authored directly in MercatorCoordinate's own axis convention
   // (X=east, Y=south, Z=altitude), the map transform below is a plain translate + uniform
   // scale -- no extra rotation matrices needed to reconcile a "Y-up" authoring convention.
-  function addThreeJsLayerToMap(originLonLat, object3d) {
-    clearSpindleSegment();   // only one segment shown at a time
+  function addThreeJsLayerToMap(originLonLat, mesh) {
     var originMercator = maplibregl.MercatorCoordinate.fromLngLat(originLonLat, 0);
     var scale = originMercator.meterInMercatorCoordinateUnits();
 
@@ -1301,7 +1140,14 @@
       onAdd: function (map, gl) {
         this.camera = new THREE.Camera();
         this.scene = new THREE.Scene();
-        this.scene.add(object3d);   // unlit line material -- no scene lights needed
+        var light1 = new THREE.DirectionalLight(0xffffff, 1.1);
+        light1.position.set(0.4, -0.2, 1).normalize();   // local (east, south, up)
+        this.scene.add(light1);
+        var light2 = new THREE.DirectionalLight(0xffffff, 0.5);
+        light2.position.set(-0.4, 0.3, -0.5).normalize();
+        this.scene.add(light2);
+        this.scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+        this.scene.add(mesh);
         this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
         this.renderer.autoClear = false;
       },
