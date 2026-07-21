@@ -41,8 +41,38 @@
     directionFilter: "all",
     planOverlay: null,
     threeDOverlay: null,
+    subwayRoutes3D: null,
     messageTimer: null
   };
+
+  function hexToRgba(hex, alpha) {
+    var value = parseInt(String(hex).replace("#", ""), 16);
+    return [(value >> 16) & 255, (value >> 8) & 255, value & 255, alpha];
+  }
+
+  // The 3D map has terrain enabled, so an ordinary MapLibre line layer for the
+  // subway route gets depth-tested against extruded buildings and disappears
+  // behind them. Rendering it as a deck.gl layer with depthTest off paints it
+  // regardless of what's already in the depth buffer, keeping it visible
+  // through buildings. Data comes from index.html's broadcast (see
+  // "platform:three-d-subway-routes-updated" below) rather than a fetch here,
+  // since index.html already owns loading/reprojecting the route shapes.
+  function makeThreeDSubwayLayer() {
+    if (!state.subwayRoutes3D || !state.subwayRoutes3D.features.length) return [];
+    return [
+      new deck.GeoJsonLayer({
+        id: "three-d-subway-lines",
+        data: state.subwayRoutes3D,
+        getLineColor: function (feature) { return hexToRgba(feature.properties.color, 235); },
+        getLineWidth: 6,
+        lineWidthUnits: "pixels",
+        lineJointRounded: true,
+        lineCapRounded: true,
+        pickable: false,
+        parameters: { depthTest: false }
+      })
+    ];
+  }
 
   function filteredFlights() {
     return state.flights.filter(function (flight) {
@@ -64,6 +94,17 @@
     map.addControl(overlay);
     state[property] = overlay;
     updateFlightLayers();
+    if (mode === "plan") {
+      // Flight trails/planes and the boundary ring just landed on top of the
+      // Plan map's layer stack (deck.gl's interleaved overlay has no beforeId,
+      // so it renders above everything by default). Subway lines must stay
+      // visually in front of that regardless of load order, so push them back
+      // to the top now. (The 3D map doesn't need this -- its subway line is a
+      // depth-test-disabled deck.gl layer, see makeThreeDSubwayLayer below.)
+      if (window.PlanView && typeof window.PlanView.bringSubwayToFront === "function") {
+        window.PlanView.bringSubwayToFront();
+      }
+    }
   }
 
   function addBoundaryLayers(map, mode) {
@@ -216,7 +257,10 @@
 
   function updateFlightLayers() {
     if (state.planOverlay) state.planOverlay.setProps({ layers: makeFlightLayers("plan") });
-    if (state.threeDOverlay) state.threeDOverlay.setProps({ layers: makeFlightLayers("3d") });
+    if (state.threeDOverlay) {
+      // Subway layer goes last so it also paints on top of flight trails/planes.
+      state.threeDOverlay.setProps({ layers: makeFlightLayers("3d").concat(makeThreeDSubwayLayer()) });
+    }
   }
 
   function statusColor(flight, alpha) {
@@ -451,6 +495,10 @@
   });
   document.addEventListener("platform:three-d-map-ready", function () {
     attachOverlay(window.ThreeDView && window.ThreeDView.getMap(), "3d");
+  });
+  document.addEventListener("platform:three-d-subway-routes-updated", function (event) {
+    state.subwayRoutes3D = (event.detail && event.detail.featureCollection) || null;
+    updateFlightLayers();
   });
   document.addEventListener("platform:subways-updated", function (event) {
     var detail = event.detail || {};

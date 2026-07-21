@@ -964,9 +964,29 @@
       removeGeoJsonLayer(layerId);
       routeLayerOnById[routeId] = false;
     }
+    bringSubwayToFront();   // keep subway lines above anything else layered on afterward
   }
   function syncAllRouteLayers() {
     Object.keys(routeGeoJsonById).forEach(syncRouteLayer);
+  }
+
+  // ---- Subway lines must always render above everything else on the Plan
+  // map (flight trails/planes, live-train dots, boundary rings), no matter
+  // which order those other layers happen to load in. moveLayer(id) with no
+  // beforeId re-appends a layer at the very top of the style's layer stack,
+  // so calling this after any layer addition keeps subway on top. (The 3D map
+  // handles this differently -- see syncThreeDRouteLayer above -- because
+  // terrain there makes layer order alone insufficient.) ----
+  function subwayRouteIds() {
+    return routes.filter(function (r) { return r.type === "subway"; }).map(function (r) { return r.id; });
+  }
+  function bringLayerToFront(map, layerId) {
+    if (map && map.getLayer(layerId)) map.moveLayer(layerId);
+  }
+  function bringSubwayToFront() {
+    subwayRouteIds().forEach(function (routeId) {
+      bringLayerToFront(planMap, "route-" + routeId);
+    });
   }
 
   // ---- Coordinate system: all source files are EPSG:2263 (NAD83 / NY Long
@@ -1034,6 +1054,7 @@
     getMap: function () { return planMap; },
     addGeoJsonPolyline: addGeoJsonPolyline,
     removeGeoJsonLayer: removeGeoJsonLayer,
+    bringSubwayToFront: bringSubwayToFront,
     reprojectGeoJson: reprojectGeoJson   // exposed in case a caller needs the converted data itself
   };
   // ==============================================================
@@ -1043,7 +1064,6 @@
   // Terrain and building extrusions add geometry while reusing MapPalette colors.
   var threeDMap = null;
   var threeDMapReady = false;
-  var threeDRouteLayerOnById = {};
   var ThreeDInitialCamera = {
     center: [-73.874, 40.777], // LaGuardia Airport, [lon, lat]
     zoom: 14.5,
@@ -1130,35 +1150,33 @@
     if (button) setThreeDCameraPreset(button.getAttribute("data-camera-preset"));
   });
 
+  // The 3D map has terrain enabled (see setTerrain below), which makes MapLibre
+  // depth-test ordinary line layers against real 3D geometry -- so a native
+  // line layer for the subway route gets legitimately hidden behind extruded
+  // buildings no matter its position in the style's layer stack. To keep it
+  // visible through buildings, the 3D route is NOT a MapLibre layer at all;
+  // instead its reprojected GeoJSON is broadcast for integrated-flight-tracker.js
+  // to render as a deck.gl layer with `parameters: { depthTest: false }`,
+  // which paints regardless of what's already in the depth buffer.
   function syncThreeDRouteLayer(routeId) {
-    var geo = routeGeoJsonById[routeId];
-    if (!geo || !threeDMapReady) return;
-    var isOn = !!selectedRoutes[routeId];
-    var onMap = !!threeDRouteLayerOnById[routeId];
-    var layerId = "three-d-route-" + routeId;
-    if (isOn && !onMap) {
-      var route = routes.filter(function (r) { return r.id === routeId; })[0];
-      threeDMap.addSource(layerId, { type: "geojson", data: reprojectGeoJson(geo) });
-      threeDMap.addLayer({
-        id: layerId,
-        type: "line",
-        source: layerId,
-        layout: { "line-join": "round", "line-cap": "round" },
-        paint: {
-          "line-color": route.color,
-          "line-width": 6,
-          "line-opacity": 0.95
-        }
-      });
-      threeDRouteLayerOnById[routeId] = true;
-    } else if (!isOn && onMap) {
-      if (threeDMap.getLayer(layerId)) threeDMap.removeLayer(layerId);
-      if (threeDMap.getSource(layerId)) threeDMap.removeSource(layerId);
-      threeDRouteLayerOnById[routeId] = false;
-    }
+    if (!routeGeoJsonById[routeId]) return;
+    broadcastThreeDSubwayRoutes();
   }
   function syncAllThreeDRouteLayers() {
     Object.keys(routeGeoJsonById).forEach(syncThreeDRouteLayer);
+  }
+  function broadcastThreeDSubwayRoutes() {
+    var features = subwayRouteIds()
+      .filter(function (routeId) { return selectedRoutes[routeId] && routeGeoJsonById[routeId]; })
+      .map(function (routeId) {
+        var route = routes.filter(function (r) { return r.id === routeId; })[0];
+        var feature = reprojectGeoJson(routeGeoJsonById[routeId]);
+        feature.properties = Object.assign({}, feature.properties, { routeId: routeId, color: route.color });
+        return feature;
+      });
+    document.dispatchEvent(new CustomEvent("platform:three-d-subway-routes-updated", {
+      detail: { featureCollection: { type: "FeatureCollection", features: features } }
+    }));
   }
   window.ThreeDView = {
     getMap: function () { return threeDMap; },
@@ -1237,6 +1255,7 @@
         .setHTML("<strong>" + p.route + " train</strong><br/>Next stop: " + p.nextStop)
         .addTo(planMap);
     });
+    bringSubwayToFront();
 
     ensureTrainPolling();
   }
@@ -1274,6 +1293,7 @@
         showSpindleSegment(p.route, f.geometry.coordinates);
       }
     });
+    bringSubwayToFront();
     ensureTrainPolling();
   }
 
