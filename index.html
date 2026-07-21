@@ -129,6 +129,69 @@
     background: var(--na, #000000);
   }
 
+  #flight-signal-tooltip {
+    position: fixed;
+    display: none;
+    max-width: 310px;
+    padding: 10px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    border-radius: 8px;
+    background: rgba(20, 29, 37, 0.94);
+    color: #ffffff;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-line;
+    pointer-events: none;
+    z-index: 10020;
+  }
+  .section-signal-live {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: sectionSignalPulse 1s ease-out infinite;
+  }
+  @keyframes sectionSignalPulse {
+    from { opacity: 0.9; transform: scale(0.75); }
+    to { opacity: 0; transform: scale(1.55); }
+  }
+  #section-signal-layout {
+    display: none;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-top: 10px;
+    padding: 7px;
+    border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.16));
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+  }
+  body[data-view-mode="section"] #section-signal-layout { display: flex; }
+  #section-signal-layout .layout-label {
+    flex-basis: 100%;
+    padding: 0 3px 4px;
+    color: var(--interface-muted, #9eabb4);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  #section-signal-layout button {
+    flex: 1 1 105px;
+    border: 0;
+    border-radius: 5px;
+    padding: 6px 10px;
+    background: transparent;
+    color: #3f4f5a;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  #section-signal-layout button[aria-pressed="true"] {
+    background: var(--theme1-mid, #72a391);
+    color: #ffffff;
+  }
+
   /* ---- View containers (Section View / Plan View / 3D View): full screen ---- */
   #sectionView, #planView, #threeDView {
     position: absolute;
@@ -238,6 +301,7 @@
       <g id="flightProfile"></g>
     </svg>
     <div id="section-signal-legend"><span class="sq"></span><span>=10s</span></div>
+    <div id="flight-signal-tooltip" role="tooltip"></div>
   </div>
 
   <div id="planView">
@@ -286,6 +350,11 @@
         </div>
         <div class="group-label">Signal source</div>
         <div id="source-box"></div>
+        <div id="section-signal-layout" role="group" aria-label="Signal visualization layout">
+          <span class="layout-label">Section signal layout</span>
+          <button type="button" data-signal-layout="along-route" aria-pressed="false">Along Route</button>
+          <button type="button" data-signal-layout="separate-plot" aria-pressed="true">Separate Plot</button>
+        </div>
       </div>
     </div>
   </div>
@@ -415,7 +484,43 @@
   var flightProfile = document.getElementById("flightProfile");
   var svg = document.getElementById("stage");
   var legend = document.getElementById("section-signal-legend");
+  var flightSignalTooltip = document.getElementById("flight-signal-tooltip");
+  var sectionSignalLayoutControl = document.getElementById("section-signal-layout");
+  var sectionSignalLayoutButtons = Array.prototype.slice.call(
+    sectionSignalLayoutControl.querySelectorAll("button[data-signal-layout]")
+  );
   var activeSectionFlight = null;
+  var activeSectionSignalHistory = [];
+  var activeSectionProvisionalSignals = [];
+  var activeSectionSignalSince = null;
+  var activeSectionLiveSignal = null;
+  var activeSectionSignalLoadingIcao24 = null;
+  var activeSectionSignalSelectionVersion = 0;
+  var sectionSignalRenderSamples = [];
+  var sectionSignalLayout = "separate-plot";
+  var SectionSignalVisualFloorDb = -20;
+  var SectionSignalFrequencyColors = {
+    "118.7": "#3264ff",
+    "120.4": "#ef7d32",
+    "120.8": "#8b5cf6",
+    "121.7": "#18a36f"
+  };
+
+  function setSectionSignalLayout(layout) {
+    if (layout !== "along-route" && layout !== "separate-plot") return;
+    sectionSignalLayout = layout;
+    sectionSignalLayoutButtons.forEach(function (button) {
+      button.setAttribute("aria-pressed", String(button.getAttribute("data-signal-layout") === layout));
+    });
+    flightSignalTooltip.style.display = "none";
+    draw();
+  }
+
+  sectionSignalLayoutButtons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      setSectionSignalLayout(button.getAttribute("data-signal-layout"));
+    });
+  });
 
   // ----- Build route buttons -----
   function makeRouteButton(route) {
@@ -581,36 +686,215 @@
       .replace(/>/g, "&gt;").replace(/\"/g, "&quot;");
   }
 
-  // Straighten the observed ground track from left to right while preserving its real
-  // altitude changes. X is cumulative haversine distance; Y is observed altitude.
+  function sectionSignalFrequencyKey(value) {
+    if (value == null || value === "") return "unknown";
+    var number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(1) : "unknown";
+  }
+
+  function sectionSignalFrequencyColor(value) {
+    var key = sectionSignalFrequencyKey(value);
+    return SectionSignalFrequencyColors[key] || "#7d8790";
+  }
+
+  function sectionSignalAltitudeFt(point) {
+    if (!point || point.aircraft_altitude_m == null || point.aircraft_altitude_m === "") return null;
+    var altitudeM = Number(point && point.aircraft_altitude_m);
+    return Number.isFinite(altitudeM) ? Math.max(0, altitudeM * 3.28084) : null;
+  }
+
+  function sectionSignalPosition(point) {
+    if (!point || point.aircraft_lat == null || point.aircraft_lon == null ||
+        point.aircraft_lat === "" || point.aircraft_lon === "") return null;
+    var latitude = Number(point && point.aircraft_lat);
+    var longitude = Number(point && point.aircraft_lon);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return { latitude: latitude, longitude: longitude };
+  }
+
+  function mergeSectionSignalPoints(existing, incoming) {
+    var byTimestamp = {};
+    existing.concat(incoming || []).forEach(function (point) {
+      if (!point || point.timestamp == null || point.timestamp === "") return;
+      var timestamp = Number(point && point.timestamp);
+      if (Number.isFinite(timestamp)) byTimestamp[String(timestamp)] = point;
+    });
+    return Object.keys(byTimestamp).map(function (key) {
+      return byTimestamp[key];
+    }).sort(function (a, b) {
+      return Number(a.timestamp) - Number(b.timestamp);
+    });
+  }
+
+  function appendSectionProvisionalSignal(point) {
+    if (!point || point.timestamp == null || point.timestamp === "" ||
+        !Number.isFinite(Number(point.timestamp))) return;
+    if (activeSectionSignalSince != null && Number(point.timestamp) <= activeSectionSignalSince) return;
+    activeSectionProvisionalSignals = mergeSectionSignalPoints(activeSectionProvisionalSignals, [point]);
+  }
+
+  function combinedSectionSignalPoints() {
+    var combined = mergeSectionSignalPoints(activeSectionSignalHistory, activeSectionProvisionalSignals);
+    if (activeSectionLiveSignal) combined = mergeSectionSignalPoints(combined, [activeSectionLiveSignal]);
+    return combined.filter(function (point) {
+      return sectionSignalPosition(point) && sectionSignalAltitudeFt(point) != null;
+    });
+  }
+
+  function loadActiveSectionSignalHistory() {
+    if (!activeSectionFlight || !activeSectionFlight.icao24) return;
+    var icao24 = String(activeSectionFlight.icao24).toLowerCase();
+    if (activeSectionSignalLoadingIcao24 === icao24) return;
+    var selectionVersion = activeSectionSignalSelectionVersion;
+    var url = "/api/signal-v2?icao24=" + encodeURIComponent(icao24);
+    if (activeSectionSignalSince != null) {
+      url += "&since=" + encodeURIComponent(activeSectionSignalSince);
+    }
+    activeSectionSignalLoadingIcao24 = icao24;
+    fetch(url, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("Signal history returned HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        if (!activeSectionFlight || String(activeSectionFlight.icao24).toLowerCase() !== icao24 ||
+            selectionVersion !== activeSectionSignalSelectionVersion) return;
+        activeSectionSignalHistory = mergeSectionSignalPoints(activeSectionSignalHistory, payload.points || []);
+        var finalizedThrough = payload.finalized_through == null ? NaN : Number(payload.finalized_through);
+        if (Number.isFinite(finalizedThrough)) {
+          activeSectionSignalSince = finalizedThrough;
+          activeSectionProvisionalSignals = activeSectionProvisionalSignals.filter(function (point) {
+            return Number(point.timestamp) > finalizedThrough;
+          });
+        }
+        draw();
+      })
+      .catch(function (error) {
+        if (window.console && console.warn) console.warn("Section signal history unavailable:", error);
+      })
+      .then(function () {
+        if (activeSectionSignalLoadingIcao24 === icao24) activeSectionSignalLoadingIcao24 = null;
+      });
+  }
+
+  function sectionSignalDistanceAt(point, routePoints, cumulative) {
+    if (!routePoints.length) return 0;
+    var timestamp = point.timestamp == null ? NaN : Number(point.timestamp);
+    var firstTime = Number(routePoints[0].timestamp);
+    var lastIndex = routePoints.length - 1;
+    var lastTime = Number(routePoints[lastIndex].timestamp);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(firstTime) || !Number.isFinite(lastTime)) return 0;
+    if (timestamp <= firstTime) return 0;
+    if (timestamp >= lastTime) {
+      var position = sectionSignalPosition(point);
+      return cumulative[lastIndex] + (position ? flightDistanceNm(routePoints[lastIndex], position) : 0);
+    }
+    var low = 0;
+    var high = lastIndex;
+    while (high - low > 1) {
+      var middle = Math.floor((low + high) / 2);
+      if (Number(routePoints[middle].timestamp) <= timestamp) low = middle;
+      else high = middle;
+    }
+    var lowTime = Number(routePoints[low].timestamp);
+    var highTime = Number(routePoints[high].timestamp);
+    var ratio = highTime > lowTime ? (timestamp - lowTime) / (highTime - lowTime) : 0;
+    return cumulative[low] + ratio * (cumulative[high] - cumulative[low]);
+  }
+
+  function sectionSignalStarPoints(cx, cy) {
+    var points = [];
+    for (var i = 0; i < 10; i++) {
+      var radius = i % 2 === 0 ? 5 : 2.1;
+      var angle = -Math.PI / 2 + i * Math.PI / 5;
+      points.push((cx + Math.cos(angle) * radius).toFixed(1) + "," +
+        (cy + Math.sin(angle) * radius).toFixed(1));
+    }
+    return points.join(" ");
+  }
+
+  function sectionSignalRuns(samples) {
+    var runs = [];
+    var current = null;
+    samples.forEach(function (sample) {
+      var key = sample.hasLoss ? sample.frequencyKey : "unavailable";
+      if (!current || current.key !== key) {
+        var transitionPoint = current && current.key !== "unavailable" && key !== "unavailable" && current.points.length
+          ? current.points[current.points.length - 1]
+          : null;
+        if (current) runs.push(current);
+        current = {
+          key: key,
+          color: sample.hasLoss ? sample.color : "#7d8790",
+          dashed: !sample.hasLoss,
+          points: transitionPoint ? [transitionPoint] : []
+        };
+      }
+      current.points.push(sample);
+    });
+    if (current) runs.push(current);
+    return runs;
+  }
+
+  function formatSectionSignalNumber(value, digits, suffix) {
+    if (value == null || value === "") return "Unavailable";
+    var number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(digits) + (suffix || "") : "Unavailable";
+  }
+
+  // Straighten the ground track from left to right while preserving altitude. The observed
+  // route remains the baseline; a separate path-normal waveform shows modeled signal change.
   function renderFlightAltitudeProfile(w, groundTop) {
     if (!activeSectionFlight || !activeSectionFlight.track) return "";
     var points = activeSectionFlight.track.filter(function (point) {
       return Number.isFinite(Number(point.latitude)) && Number.isFinite(Number(point.longitude));
+    }).slice().sort(function (a, b) {
+      return Number(a.timestamp) - Number(b.timestamp);
     });
     if (!points.length) return "";
+
+    var signalPoints = combinedSectionSignalPoints();
 
     var cumulative = [0];
     for (var i = 1; i < points.length; i++) {
       cumulative.push(cumulative[i - 1] + flightDistanceNm(points[i - 1], points[i]));
     }
-    var totalNm = Math.max(cumulative[cumulative.length - 1], 0.1);
+    var signalDistances = signalPoints.map(function (point) {
+      return sectionSignalDistanceAt(point, points, cumulative);
+    });
+    var totalNm = Math.max.apply(null, cumulative.concat(signalDistances).concat([0.1]));
     var altitudes = points.map(function (point) {
       if (Number.isFinite(Number(point.altitude_ft))) return Math.max(0, Number(point.altitude_ft));
       return Math.max(0, Number(point.altitude_m || 0) * 3.28084);
     });
-    var maxAltitude = Math.max.apply(null, altitudes.concat([1000]));
+    var signalAltitudes = signalPoints.map(sectionSignalAltitudeFt).filter(function (altitude) {
+      return altitude != null;
+    });
+    var maxAltitude = Math.max.apply(null, altitudes.concat(signalAltitudes).concat([1000]));
     maxAltitude = Math.ceil(maxAltitude / 1000) * 1000;
 
     var plotLeft = Math.min(430, Math.max(180, w * 0.30));
     var detailsOpen = document.getElementById("details-panel").classList.contains("open");
     var plotRight = Math.max(plotLeft + 160, w - (detailsOpen ? 430 : 80));
+    var separatePlot = sectionSignalLayout === "separate-plot";
     var plotTop = 195;
-    var plotBottom = Math.max(plotTop + 120, groundTop - 35);
+    var plotBottom = Math.max(plotTop + (separatePlot ? 210 : 120), groundTop - 35);
     var plotWidth = plotRight - plotLeft;
     var plotHeight = plotBottom - plotTop;
+    var chartGap = separatePlot ? 46 : 0;
+    var altitudePlotBottom = separatePlot
+      ? plotTop + Math.max(85, (plotHeight - chartGap) * 0.56)
+      : plotBottom;
+    var signalPlotTop = separatePlot ? altitudePlotBottom + chartGap : plotTop;
+    var signalPlotBottom = plotBottom;
+    var altitudePlotHeight = altitudePlotBottom - plotTop;
+    var signalPlotHeight = Math.max(1, signalPlotBottom - signalPlotTop);
     function xAt(index) { return plotLeft + cumulative[index] / totalNm * plotWidth; }
-    function yAt(altitude) { return plotBottom - altitude / maxAltitude * plotHeight; }
+    function yAt(altitude) { return altitudePlotBottom - altitude / maxAltitude * altitudePlotHeight; }
+    function signalYAt(relativeDb) {
+      var clamped = Math.max(SectionSignalVisualFloorDb, Math.min(0, relativeDb));
+      return signalPlotTop + (0 - clamped) / (0 - SectionSignalVisualFloorDb) * signalPlotHeight;
+    }
 
     var statusColor = activeSectionFlight.status === "confirmed" ? "#2ed47a" : "#f5a623";
     var markup = "";
@@ -627,23 +911,255 @@
       return xAt(index).toFixed(1) + "," + yAt(altitudes[index]).toFixed(1);
     }).join(" ");
     markup += '<polyline points="' + polyline + '" fill="none" stroke="' + statusColor +
-      '" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"></polyline>';
+      '" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" opacity="0.78"></polyline>';
+
+    if (separatePlot) {
+      [0, -10, SectionSignalVisualFloorDb].forEach(function (relativeDb) {
+        var signalGridY = signalYAt(relativeDb);
+        markup += '<line x1="' + plotLeft + '" y1="' + signalGridY + '" x2="' + plotRight +
+          '" y2="' + signalGridY + '" stroke="#cad1d6" stroke-width="1" stroke-dasharray="4 5"></line>';
+        markup += '<text x="' + (plotLeft - 12) + '" y="' + (signalGridY + 4) +
+          '" text-anchor="end">' + relativeDb + ' dB</text>';
+      });
+      markup += '<text x="' + plotLeft + '" y="' + (signalPlotTop - 13) +
+        '" font-size="13" font-weight="700">Modeled whole-flight relative signal</text>';
+    }
+
+    var finiteLosses = signalPoints.map(function (point) {
+      return point.total_loss_db == null ? NaN : Number(point.total_loss_db);
+    }).filter(Number.isFinite);
+    var flightMinimumLoss = finiteLosses.length ? Math.min.apply(null, finiteLosses) : null;
+    var baseSamples = signalPoints.map(function (point, index) {
+      var totalLoss = point.total_loss_db == null ? NaN : Number(point.total_loss_db);
+      var hasLoss = Number.isFinite(totalLoss) && flightMinimumLoss != null;
+      var relativeDb = hasLoss ? flightMinimumLoss - totalLoss : null;
+      var normalizedStrength = hasLoss
+        ? Math.max(0, Math.min(1, (relativeDb - SectionSignalVisualFloorDb) / -SectionSignalVisualFloorDb))
+        : 0;
+      return {
+        point: point,
+        baseX: plotLeft + signalDistances[index] / totalNm * plotWidth,
+        baseY: separatePlot
+          ? (hasLoss ? signalYAt(relativeDb) : signalPlotBottom)
+          : yAt(sectionSignalAltitudeFt(point)),
+        amplitude: hasLoss ? 6 + normalizedStrength * 30 : 5,
+        relativeDb: relativeDb,
+        totalLoss: hasLoss ? totalLoss : null,
+        hasLoss: hasLoss,
+        frequencyKey: sectionSignalFrequencyKey(point.most_likely_frequency_mhz),
+        color: sectionSignalFrequencyColor(point.most_likely_frequency_mhz)
+      };
+    });
+
+    sectionSignalRenderSamples = baseSamples.map(function (sample, index) {
+      if (separatePlot) {
+        sample.x = sample.baseX;
+        sample.y = sample.baseY;
+        return sample;
+      }
+      var previous = baseSamples[Math.max(0, index - 1)];
+      var next = baseSamples[Math.min(baseSamples.length - 1, index + 1)];
+      var dx = next.baseX - previous.baseX;
+      var dy = next.baseY - previous.baseY;
+      var length = Math.sqrt(dx * dx + dy * dy) || 1;
+      var normalX = dy / length;
+      var normalY = -dx / length;
+      if (normalY > 0) {
+        normalX *= -1;
+        normalY *= -1;
+      }
+      sample.x = sample.baseX + normalX * sample.amplitude;
+      sample.y = sample.baseY + normalY * sample.amplitude;
+      return sample;
+    });
+
+    sectionSignalRuns(sectionSignalRenderSamples).forEach(function (run) {
+      if (run.points.length < 2) return;
+      var runPoints = run.points.map(function (sample) {
+        return sample.x.toFixed(1) + "," + sample.y.toFixed(1);
+      }).join(" ");
+      if (!run.dashed) {
+        markup += '<polyline points="' + runPoints + '" fill="none" stroke="' + run.color +
+          '" stroke-width="9" stroke-opacity="0.16" stroke-linejoin="round" stroke-linecap="round"></polyline>';
+      }
+      markup += '<polyline points="' + runPoints + '" fill="none" stroke="' + run.color +
+        '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"' +
+        (run.dashed ? ' stroke-dasharray="5 5"' : '') + '></polyline>';
+    });
+
+    if (sectionSignalRenderSamples.length) {
+      var markerTarget = Math.max(18, Math.floor(plotWidth / 20));
+      var markerStep = Math.max(1, Math.ceil(sectionSignalRenderSamples.length / markerTarget));
+      var markerIndexes = {};
+      sectionSignalRenderSamples.forEach(function (sample, index) {
+        if (index === 0 || index === sectionSignalRenderSamples.length - 1 || index % markerStep === 0 ||
+            (index > 0 && sample.frequencyKey !== sectionSignalRenderSamples[index - 1].frequencyKey)) {
+          markerIndexes[index] = true;
+        }
+      });
+      Object.keys(markerIndexes).forEach(function (key) {
+        var sample = sectionSignalRenderSamples[Number(key)];
+        markup += '<polygon points="' + sectionSignalStarPoints(sample.x, sample.y) + '" fill="' +
+          (sample.hasLoss ? sample.color : "#7d8790") + '" stroke="#ffffff" stroke-width="0.8"></polygon>';
+      });
+
+      var currentSample = sectionSignalRenderSamples[sectionSignalRenderSamples.length - 1];
+      markup += '<circle class="section-signal-live" cx="' + currentSample.x.toFixed(1) + '" cy="' +
+        currentSample.y.toFixed(1) + '" r="8" fill="none" stroke="' + currentSample.color +
+        '" stroke-width="2"></circle>';
+    }
 
     var last = points.length - 1;
     markup += '<circle cx="' + xAt(last) + '" cy="' + yAt(altitudes[last]) +
       '" r="7" fill="' + statusColor + '" stroke="#ffffff" stroke-width="2"></circle>';
-    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 15) + '" font-size="16" font-weight="700">' +
+    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 50) + '" font-size="16" font-weight="700">' +
       escapeSectionText(activeSectionFlight.callsign || activeSectionFlight.icao24.toUpperCase()) +
-      ' &middot; observed altitude profile</text>';
+      (separatePlot
+        ? ' &middot; altitude + independent signal plot</text>'
+        : ' &middot; altitude + route-following signal waveform</text>');
+    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 30) + '" font-size="12">' +
+      (separatePlot
+        ? 'Shared cumulative-distance X axis &middot; independent altitude and signal Y axes</text>'
+        : 'Waveform height: whole-flight relative signal (0 to &minus;20 dB visual range; taller = stronger)</text>');
+
+    var legendKeys = {};
+    var hasUnavailable = false;
+    sectionSignalRenderSamples.forEach(function (sample) {
+      if (sample.hasLoss && sample.frequencyKey !== "unknown") legendKeys[sample.frequencyKey] = true;
+      else if (!sample.hasLoss) hasUnavailable = true;
+    });
+    var legendX = plotLeft;
+    Object.keys(legendKeys).sort(function (a, b) { return Number(a) - Number(b); }).forEach(function (key) {
+      markup += '<line x1="' + legendX + '" y1="' + (plotTop - 10) + '" x2="' + (legendX + 20) +
+        '" y2="' + (plotTop - 10) + '" stroke="' + sectionSignalFrequencyColor(key) +
+        '" stroke-width="4" stroke-linecap="round"></line>';
+      markup += '<text x="' + (legendX + 26) + '" y="' + (plotTop - 6) + '">' + key + ' MHz</text>';
+      legendX += 112;
+    });
+    if (hasUnavailable || !sectionSignalRenderSamples.length) {
+      markup += '<line x1="' + legendX + '" y1="' + (plotTop - 10) + '" x2="' + (legendX + 20) +
+        '" y2="' + (plotTop - 10) + '" stroke="#7d8790" stroke-width="3" stroke-dasharray="4 4"></line>';
+      markup += '<text x="' + (legendX + 26) + '" y="' + (plotTop - 6) + '">' +
+        (sectionSignalRenderSamples.length ? 'Unavailable' : 'Waiting for V2 signal history') + '</text>';
+    }
     markup += '<text x="' + ((plotLeft + plotRight) / 2) + '" y="' + (plotBottom + 26) +
       '" text-anchor="middle">Cumulative distance traveled: ' + totalNm.toFixed(1) + ' NM</text>';
+    if (sectionSignalRenderSamples.length) {
+      if (separatePlot) {
+        markup += '<line data-section-signal-guide="true" x1="0" y1="' + plotTop + '" x2="0" y2="' +
+          signalPlotBottom + '" stroke="#52616c" stroke-width="1" stroke-dasharray="3 4" visibility="hidden"></line>';
+      }
+      markup += '<rect data-section-signal-hit="true" x="' + plotLeft + '" y="' + plotTop + '" width="' +
+        plotWidth + '" height="' + plotHeight + '" fill="transparent" pointer-events="all"></rect>';
+    }
     return markup;
   }
 
+  function resetActiveSectionSignal() {
+    activeSectionSignalHistory = [];
+    activeSectionProvisionalSignals = [];
+    activeSectionSignalSince = null;
+    activeSectionLiveSignal = null;
+    activeSectionSignalLoadingIcao24 = null;
+    sectionSignalRenderSamples = [];
+    activeSectionSignalSelectionVersion += 1;
+    flightSignalTooltip.style.display = "none";
+  }
+
   window.setActiveSectionFlight = function (flight) {
+    var previousIcao24 = activeSectionFlight && activeSectionFlight.icao24
+      ? String(activeSectionFlight.icao24).toLowerCase()
+      : null;
+    var nextIcao24 = flight && flight.icao24 ? String(flight.icao24).toLowerCase() : null;
+    if (previousIcao24 !== nextIcao24) resetActiveSectionSignal();
     activeSectionFlight = flight || null;
+    if (activeSectionFlight && activeSectionFlight.signal_v2) {
+      activeSectionLiveSignal = activeSectionFlight.signal_v2.live_current ||
+        activeSectionFlight.signal_v2.current || null;
+      appendSectionProvisionalSignal(activeSectionLiveSignal);
+    }
     draw();
+    if (activeSectionFlight) loadActiveSectionSignalHistory();
   };
+
+  window.addEventListener("platform:flight-signal-v2-tick", function (event) {
+    if (!activeSectionFlight || !event.detail || !event.detail.flights) return;
+    var activeIcao24 = String(activeSectionFlight.icao24).toLowerCase();
+    var tick = event.detail.flights.find(function (item) {
+      return String(item.icao24).toLowerCase() === activeIcao24;
+    });
+    if (!tick || !tick.signal) return;
+    activeSectionLiveSignal = tick.signal;
+    appendSectionProvisionalSignal(tick.signal);
+    draw();
+  });
+
+  function nearestSectionSignalSample(x) {
+    if (!sectionSignalRenderSamples.length) return null;
+    var low = 0;
+    var high = sectionSignalRenderSamples.length - 1;
+    while (high - low > 1) {
+      var middle = Math.floor((low + high) / 2);
+      if (sectionSignalRenderSamples[middle].baseX <= x) low = middle;
+      else high = middle;
+    }
+    return Math.abs(sectionSignalRenderSamples[low].baseX - x) <=
+      Math.abs(sectionSignalRenderSamples[high].baseX - x)
+      ? sectionSignalRenderSamples[low]
+      : sectionSignalRenderSamples[high];
+  }
+
+  function hideSectionSignalGuide() {
+    var guide = flightProfile.querySelector('[data-section-signal-guide="true"]');
+    if (guide) guide.setAttribute("visibility", "hidden");
+  }
+
+  flightProfile.addEventListener("pointermove", function (event) {
+    if (!event.target || event.target.getAttribute("data-section-signal-hit") !== "true") {
+      flightSignalTooltip.style.display = "none";
+      hideSectionSignalGuide();
+      return;
+    }
+    var bounds = svg.getBoundingClientRect();
+    var svgWidth = Number(svg.getAttribute("width")) || bounds.width;
+    var svgX = (event.clientX - bounds.left) * svgWidth / bounds.width;
+    var sample = nearestSectionSignalSample(svgX);
+    if (!sample) return;
+    var guide = flightProfile.querySelector('[data-section-signal-guide="true"]');
+    if (guide) {
+      guide.setAttribute("x1", sample.baseX.toFixed(1));
+      guide.setAttribute("x2", sample.baseX.toFixed(1));
+      guide.setAttribute("visibility", "visible");
+    }
+    var point = sample.point;
+    var time = point.timestamp != null && Number.isFinite(Number(point.timestamp))
+      ? new Date(Number(point.timestamp) * 1000).toLocaleTimeString()
+      : "Unavailable";
+    var frequency = sectionSignalFrequencyKey(point.most_likely_frequency_mhz);
+    var phase = String(point.inferred_phase || "unknown").replace(/_/g, " ");
+    var positionStatus = String(point.position_status || "unknown").replace(/_/g, " ");
+    flightSignalTooltip.textContent = [
+      time + "  |  " + positionStatus,
+      "Inferred phase: " + phase,
+      "Inferred frequency: " + (frequency === "unknown" ? "Unavailable" : frequency + " MHz"),
+      "Whole-flight relative change: " + formatSectionSignalNumber(sample.relativeDb, 2, " dB"),
+      "Modeled total loss: " + formatSectionSignalNumber(point.total_loss_db, 2, " dB"),
+      "Free-space loss: " + formatSectionSignalNumber(point.fspl_db, 2, " dB"),
+      "Building loss: " + formatSectionSignalNumber(point.building_loss_db, 2, " dB"),
+      "Frequency assignment: " + String(point.frequency_assignment_status || "unavailable").replace(/_/g, " "),
+      "Modeled values, not measured dBm"
+    ].join("\n");
+    flightSignalTooltip.style.display = "block";
+    var left = Math.min(event.clientX + 14, window.innerWidth - flightSignalTooltip.offsetWidth - 12);
+    var top = Math.min(event.clientY + 14, window.innerHeight - flightSignalTooltip.offsetHeight - 12);
+    flightSignalTooltip.style.left = Math.max(12, left) + "px";
+    flightSignalTooltip.style.top = Math.max(12, top) + "px";
+  });
+
+  flightProfile.addEventListener("pointerleave", function () {
+    flightSignalTooltip.style.display = "none";
+    hideSectionSignalGuide();
+  });
 
   // ----- Draw the scene -----
   function draw() {
