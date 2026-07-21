@@ -350,6 +350,8 @@
         </div>
         <div class="group-label">Signal source</div>
         <div id="source-box"></div>
+        <div class="group-label">Signal tubes</div>
+        <div class="filter-options" id="signal-tubes-carrier" role="group" aria-label="Signal tube carrier"></div>
         <div id="section-signal-layout" role="group" aria-label="Signal visualization layout">
           <span class="layout-label">Section signal layout</span>
           <button type="button" data-signal-layout="along-route" aria-pressed="false">Along Route</button>
@@ -2123,6 +2125,7 @@
   };
   var SpindleSignalJson = "Source/Subway_Signal_Strength/subway-web-100.min.json";
   var SpindleProvider = "AVERAGE";
+  var SpindleProviders = ["AVERAGE", "Verizon", "AT&T", "T-Mobile", "Sprint"];
   var SpindleWindowM = 500;          // shown length on EACH side of the clicked train
   var SpindleMaxRadiusM = 500;       // radius at full signal strength, in meters
   var SpindleMinRadiusFactor = 0.08; // radius floor (as a fraction of SpindleMaxRadiusM) so weak-signal sections don't pinch to a hairline
@@ -2172,7 +2175,57 @@
   }
 
   var SpindleDataByRoute = {};   // route id -> { localPts, cum, totalLen, signalValues, maxSignal, mPerDegLon, mPerDegLat }
+  var spindleSignalJsonCache = null;
   var spindleDataLoading = false;
+
+  function spindleSignalValuesFromSegs(segs) {
+    var signalValues = [];
+    var i = 0;
+    while (segs[i] !== undefined) { signalValues.push(segs[i].signal); i++; }
+    return signalValues;
+  }
+
+  function applySpindleProviderToRoutes() {
+    if (!spindleSignalJsonCache) return;
+    SpindleRouteIds.forEach(function (routeId) {
+      var data = SpindleDataByRoute[routeId];
+      if (!data) return;
+      var segs = spindleSignalJsonCache.HiRes.providerLogs[routeId][SpindleProvider];
+      if (!segs) return;
+      var signalValues = spindleSignalValuesFromSegs(segs);
+      var maxSignal = 0;
+      signalValues.forEach(function (v) { if (v > maxSignal) maxSignal = v; });
+      if (maxSignal <= 0) maxSignal = 100;
+      data.signalValues = signalValues;
+      data.maxSignal = maxSignal;
+    });
+    if (activeSpindleRouteId && activeSpindleLonLat) {
+      showSpindleSegment(activeSpindleRouteId, activeSpindleLonLat);
+    }
+  }
+
+  (function initSignalTubesCarrierControls() {
+    var box = document.getElementById("signal-tubes-carrier");
+    if (!box) return;
+    function setSpindleProvider(provider) {
+      if (SpindleProviders.indexOf(provider) === -1 || SpindleProvider === provider) return;
+      SpindleProvider = provider;
+      box.querySelectorAll("button[data-spindle-provider]").forEach(function (btn) {
+        btn.classList.toggle("selected", btn.getAttribute("data-spindle-provider") === provider);
+      });
+      applySpindleProviderToRoutes();
+    }
+    SpindleProviders.forEach(function (name) {
+      var btn = document.createElement("button");
+      btn.className = "filter-option" + (name === SpindleProvider ? " selected" : "");
+      btn.type = "button";
+      btn.setAttribute("data-spindle-provider", name);
+      btn.textContent = name;
+      btn.addEventListener("click", function () { setSpindleProvider(name); });
+      box.appendChild(btn);
+    });
+  })();
+
   var activeSpindleTripId = null;    // tripId of the train the shown spindle is glued to, if any
   var activeSpindleRouteId = null;   // which route that train belongs to
   var activeSpindleLonLat = null;    // last [lon, lat] the shown spindle was anchored to, so a zoom
@@ -2182,13 +2235,12 @@
     if (spindleDataLoading || Object.keys(SpindleDataByRoute).length) return;
     spindleDataLoading = true;
     fetch(SpindleSignalJson).then(function (r) { return r.json(); }).then(function (signalJson) {
+      spindleSignalJsonCache = signalJson;
       return Promise.all(SpindleRouteIds.map(function (routeId) {
         return fetch(SpindleShapeUrls[routeId]).then(function (r) { return r.json(); }).then(function (shapeGeojson) {
           var lonLat = shapeGeojson.features[0].geometry.coordinates;   // WGS84, already one ordered path
           var segs = signalJson.HiRes.providerLogs[routeId][SpindleProvider];
-          var signalValues = [];
-          var i = 0;
-          while (segs[i] !== undefined) { signalValues.push(segs[i].signal); i++; }
+          var signalValues = spindleSignalValuesFromSegs(segs);
           if (lonLat.length < 2) return;
 
           // Local flat-earth meters: east = +lon, south = -lat (matches MercatorCoordinate's
