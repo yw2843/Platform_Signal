@@ -350,6 +350,16 @@
                                  // (left end is always LeftMargin, shared with station mode)
   var SubwaySlots = [0.28, 0.75];// subway line depth, as a fraction of the ground
 
+  // Plan View subway line outline (casing): every route line gets a thin light-grey
+  // casing layer underneath its colored line. Selecting a train on a route thickens
+  // that route's casing and thins its colored line, so the outline reads as the
+  // emphasized element instead of the fill.
+  var SubwayLineWeight = 4;                                 // route line width, normal
+  var SubwayLineWeightSelected = 2;                          // thinner while a train on this route is selected
+  var SubwayOutlineColor = "#f2f2f2";                        // casing color, all routes, always
+  var SubwayOutlineWeight = SubwayLineWeight + 3;             // casing width, normal
+  var SubwayOutlineWeightSelected = SubwayLineWeight + 10;    // casing width while a train on this route is selected
+
   // Station mode (shown while "Internet Connection" is selected)
   var LeftMargin = 140;          // px gap from the left screen edge to the first station
   var RightPadding = 140;        // px kept to the right of the last station
@@ -447,7 +457,7 @@
       stationMode = willSelect && label === "Internet Connection";
       legend.classList.toggle("on", stationMode);
       draw();
-      if (!stationMode) { activeSpindleTripId = null; activeSpindleRouteId = null; clearSpindleSegment(); }   // leaving Internet Connection hides any shown spindle segment
+      if (!stationMode) { activeSpindleTripId = null; activeSpindleRouteId = null; activeSpindleLonLat = null; clearSpindleSegment(); }   // leaving Internet Connection hides any shown spindle segment
     });
     sourceBox.appendChild(b);
   });
@@ -923,6 +933,7 @@
     });
     planMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
     planMap.addControl(new maplibregl.ScaleControl({ unit: "nautical" }), "bottom-right");
+    planMap.on("zoom", rebuildActiveSpindleForZoom);   // re-diameter the shown spindle, if any, as the user zooms
     planMap.on("load", function () {
       planMapReady = true;
       syncAllRouteLayers();     // apply any route selections made before the map existed
@@ -959,8 +970,9 @@
     var layerId = "route-" + routeId;
     if (isOn && !onMap) {
       var route = routes.filter(function (r) { return r.id === routeId; })[0];
-      addGeoJsonPolyline(layerId, geo, { color: route.color, weight: 4 });
+      addGeoJsonPolyline(layerId, geo, { color: route.color, weight: SubwayLineWeight });
       routeLayerOnById[routeId] = true;
+      if (routeId === selectedTrainRouteId) setRouteHighlighted(routeId, true);   // re-selected route was just re-added
     } else if (!isOn && onMap) {
       removeGeoJsonLayer(layerId);
       routeLayerOnById[routeId] = false;
@@ -972,12 +984,13 @@
   }
 
   // ---- Subway lines must always render above everything else on the Plan
-  // map (flight trails/planes, live-train dots, boundary rings), no matter
-  // which order those other layers happen to load in. moveLayer(id) with no
-  // beforeId re-appends a layer at the very top of the style's layer stack,
-  // so calling this after any layer addition keeps subway on top. (The 3D map
-  // handles this differently -- see syncThreeDRouteLayer above -- because
-  // terrain there makes layer order alone insufficient.) ----
+  // map (flight trails/planes, boundary rings), no matter which order those
+  // other layers happen to load in -- except live train dots, which render
+  // above the subway lines themselves. moveLayer(id) with no beforeId
+  // re-appends a layer at the very top of the style's layer stack, so calling
+  // this after any layer addition keeps that order. (The 3D map handles this
+  // differently -- see syncThreeDRouteLayer above -- because terrain there
+  // makes layer order alone insufficient.) ----
   function subwayRouteIds() {
     return routes.filter(function (r) { return r.type === "subway"; }).map(function (r) { return r.id; });
   }
@@ -986,8 +999,11 @@
   }
   function bringSubwayToFront() {
     subwayRouteIds().forEach(function (routeId) {
+      // Casing first, then the colored line, so the line ends up on top of its own casing.
+      bringLayerToFront(planMap, "route-" + routeId + "-casing");
       bringLayerToFront(planMap, "route-" + routeId);
     });
+    bringLayerToFront(planMap, "live-trains");   // train dots stay above the subway lines just reordered
   }
 
   // ---- Coordinate system: all source files are EPSG:2263 (NAD83 / NY Long
@@ -1034,6 +1050,19 @@
       planMap.getSource(layerId).setData(wgs84Geojson);
     } else {
       planMap.addSource(layerId, { type: "geojson", data: wgs84Geojson });
+      var weight = (style && style.weight) || 3;
+      // Thin casing underneath the colored line -- gives every polyline a light-grey
+      // outline, and lets setRouteHighlighted() thicken just the casing on selection.
+      planMap.addLayer({
+        id: layerId + "-casing",
+        type: "line",
+        source: layerId,
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-color": SubwayOutlineColor,
+          "line-width": weight + 3
+        }
+      });
       planMap.addLayer({
         id: layerId,
         type: "line",
@@ -1041,7 +1070,7 @@
         layout: { "line-join": "round", "line-cap": "round" },
         paint: {
           "line-color": (style && style.color) || NA,
-          "line-width": (style && style.weight) || 3
+          "line-width": weight
         }
       });
     }
@@ -1049,7 +1078,19 @@
   function removeGeoJsonLayer(layerId) {
     if (!planMapReady) return;
     if (planMap.getLayer(layerId)) planMap.removeLayer(layerId);
+    if (planMap.getLayer(layerId + "-casing")) planMap.removeLayer(layerId + "-casing");
     if (planMap.getSource(layerId)) planMap.removeSource(layerId);
+  }
+
+  // Thickens a subway route's casing and thins its colored line while a train on that
+  // route is selected (see selectTrain/closeTrainDetails below); reverts both otherwise.
+  function setRouteHighlighted(routeId, highlighted) {
+    if (!planMapReady) return;
+    var layerId = "route-" + routeId;
+    var casingId = layerId + "-casing";
+    if (!planMap.getLayer(layerId) || !planMap.getLayer(casingId)) return;
+    planMap.setPaintProperty(casingId, "line-width", highlighted ? SubwayOutlineWeightSelected : SubwayOutlineWeight);
+    planMap.setPaintProperty(layerId, "line-width", highlighted ? SubwayLineWeightSelected : SubwayLineWeight);
   }
   window.PlanView = {
     getMap: function () { return planMap; },
@@ -1093,6 +1134,7 @@
     });
     threeDMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
     threeDMap.addControl(new maplibregl.FullscreenControl({ container: threeDViewEl }), "top-right");
+    threeDMap.on("zoom", rebuildActiveSpindleForZoom);   // re-diameter the shown spindle, if any, as the user zooms
     threeDMap.on("load", function () {
       if (!threeDMap.getSource("terrain-dem")) {
         threeDMap.addSource("terrain-dem", {
@@ -1179,9 +1221,19 @@
       detail: { featureCollection: { type: "FeatureCollection", features: features } }
     }));
   }
+  // The 3D subway lines are deck.gl interleaved layers (see makeThreeDSubwayLayer in
+  // integrated-flight-tracker.js) that register as real native layers under their own
+  // ids, so -- same as bringSubwayToFront() above for Plan View -- moveLayer(id) with no
+  // beforeId reliably puts the native "three-d-live-trains" circle layer back on top of
+  // them. integrated-flight-tracker.js calls this after every deck.gl layer-props update,
+  // since that's the only place new subway-line layer ids can appear.
+  function bringThreeDLiveTrainsToFront() {
+    if (threeDMap && threeDMap.getLayer("three-d-live-trains")) threeDMap.moveLayer("three-d-live-trains");
+  }
   window.ThreeDView = {
     getMap: function () { return threeDMap; },
-    setCameraPreset: setThreeDCameraPreset
+    setCameraPreset: setThreeDCameraPreset,
+    bringLiveTrainsToFront: bringThreeDLiveTrainsToFront
   };
   // ======================================================================
 
@@ -1205,6 +1257,7 @@
   var trainsLayerReady = false;
   var threeDTrainsLayerReady = false;
   var selectedTrainTripId = null;   // tripId of the train shown in the shared details panel, if any
+  var selectedTrainRouteId = null;  // route id of that train's line, so its casing can be highlighted
   var trainPollingStarted = false;
   // Parsed once, immediately -- cheap, and must not depend on any view having been opened
   // yet, since a route button (which can trigger an immediate refresh) is reachable before
@@ -1270,20 +1323,27 @@
 
   function selectTrain(p) {
     selectedTrainTripId = p.tripId;
+    var previousRouteId = selectedTrainRouteId;
+    selectedTrainRouteId = p.route;
     // Synchronous: integrated-flight-tracker.js's listener runs and clears any
     // selected flight (closing the panel) before the lines below reopen it for this train.
     document.dispatchEvent(new CustomEvent("platform:train-selected", { detail: { tripId: p.tripId, route: p.route } }));
     renderTrainDetails(p);
     trainDetailsPanel.classList.add("open");
     trainDetailsPanel.setAttribute("aria-hidden", "false");
+    if (previousRouteId && previousRouteId !== selectedTrainRouteId) setRouteHighlighted(previousRouteId, false);
+    setRouteHighlighted(selectedTrainRouteId, true);
     renderTrains();   // refresh the highlighted-dot state immediately
   }
 
   function closeTrainDetails() {
     if (!selectedTrainTripId) return;
     selectedTrainTripId = null;
+    if (selectedTrainRouteId) setRouteHighlighted(selectedTrainRouteId, false);
+    selectedTrainRouteId = null;
     trainDetailsPanel.classList.remove("open");
     trainDetailsPanel.setAttribute("aria-hidden", "true");
+    document.dispatchEvent(new CustomEvent("platform:train-deselected"));
     renderTrains();
   }
 
@@ -1314,7 +1374,7 @@
           14, ["case", ["boolean", ["get", "selected"], false], 14, 9]
         ],
         "circle-color": ["case", ["boolean", ["get", "selected"], false], White, ["get", "color"]],
-        "circle-stroke-color": ["case", ["boolean", ["get", "selected"], false], ["get", "color"], NA],
+        "circle-stroke-color": SubwayOutlineColor,
         "circle-stroke-width": ["case", ["boolean", ["get", "selected"], false], 3, 1],
         "circle-opacity": 0.9
       }
@@ -1352,7 +1412,7 @@
           16, ["case", ["boolean", ["get", "selected"], false], 20, 10]
         ],
         "circle-color": ["case", ["boolean", ["get", "selected"], false], White, ["get", "color"]],
-        "circle-stroke-color": ["case", ["boolean", ["get", "selected"], false], ["get", "color"], White],
+        "circle-stroke-color": SubwayOutlineColor,
         "circle-stroke-width": ["case", ["boolean", ["get", "selected"], false], 3, 2],
         "circle-opacity": 0.95
       }
@@ -1514,6 +1574,7 @@
       } else {
         activeSpindleTripId = null;
         activeSpindleRouteId = null;
+        activeSpindleLonLat = null;
         clearSpindleSegment();
       }
     }
@@ -1566,10 +1627,40 @@
                                       // 0 = flush with the ground (drape mode). Update this
                                       // once real subway burial-depth data is available.
 
+  // The tube's radius is baked into its geometry in real-world meters (see ringVerts in
+  // showSpindleSegment below), so unlike a native MapLibre paint property it doesn't
+  // automatically respond to zoom the way, say, circle-radius does for the train dots --
+  // it just behaves like any other real-world-sized 3D object under the camera's
+  // perspective. spindleZoomDiameterScale() adds a deliberate extra zoom response on top
+  // of that (bigger relative to the real 500m width when zoomed out so it stays visible,
+  // smaller when zoomed in close so it doesn't swallow the screen), applied only to the
+  // cross-sectional radius -- never to distance along the path -- so the shown window
+  // still represents a real, fixed length even as its rendered diameter changes.
+  var SpindleZoomDiameterMinZoom = 12;      // at/below this zoom, diameter is scaled up most
+  var SpindleZoomDiameterMaxZoom = 18;      // at/above this zoom, diameter is scaled down most
+  var SpindleZoomDiameterScaleAtMinZoom = 2.55;
+  var SpindleZoomDiameterScaleAtMaxZoom = 0.06;
+  function spindleZoomDiameterScale(zoom) {
+    var t = (zoom - SpindleZoomDiameterMinZoom) / (SpindleZoomDiameterMaxZoom - SpindleZoomDiameterMinZoom);
+    t = Math.max(0, Math.min(1, t));   // clamp beyond either end, same as a MapLibre "interpolate" expression
+    return SpindleZoomDiameterScaleAtMinZoom + (SpindleZoomDiameterScaleAtMaxZoom - SpindleZoomDiameterScaleAtMinZoom) * t;
+  }
+  // Whichever view is currently on screen drives the scale -- Plan View, 3D View, and
+  // Section View are mutually exclusive (see setViewMode), so exactly one map is ever
+  // actually visible to zoom.
+  function activeSpindleMapZoom() {
+    var mode = document.body.getAttribute("data-view-mode");
+    if (mode === "3d" && threeDMap) return threeDMap.getZoom();
+    if (planMap) return planMap.getZoom();
+    return MapZoom;
+  }
+
   var SpindleDataByRoute = {};   // route id -> { localPts, cum, totalLen, signalValues, maxSignal, mPerDegLon, mPerDegLat }
   var spindleDataLoading = false;
   var activeSpindleTripId = null;    // tripId of the train the shown spindle is glued to, if any
   var activeSpindleRouteId = null;   // which route that train belongs to
+  var activeSpindleLonLat = null;    // last [lon, lat] the shown spindle was anchored to, so a zoom
+                                      // change alone can rebuild it in place (see the "zoom" listeners below)
 
   function loadSpindleData() {
     if (spindleDataLoading || Object.keys(SpindleDataByRoute).length) return;
@@ -1663,6 +1754,7 @@
   function showSpindleSegment(routeId, lonLatPt) {
     var data = SpindleDataByRoute[routeId];
     if (!data) return;
+    activeSpindleLonLat = lonLatPt;   // remembered so a zoom change alone can rebuild in place
     var centerDist = nearestDistanceAlongPath(data, lonLatPt);
     var start = Math.max(0, centerDist - SpindleWindowM);
     var end = Math.min(data.totalLen, centerDist + SpindleWindowM);
@@ -1681,10 +1773,11 @@
 
     // Flat-ended: no tapering envelope -- radius follows signal strength alone, so the cut
     // ends of the window are open/flat rather than pinching to a point.
+    var zoomDiameterScale = spindleZoomDiameterScale(activeSpindleMapZoom());
     var radius = [];
     for (var s = 0; s < N; s++) {
       var strength = SpindleMinRadiusFactor + (1 - SpindleMinRadiusFactor) * normSignal(s);
-      radius.push(strength * SpindleMaxRadiusM);
+      radius.push(strength * SpindleMaxRadiusM * zoomDiameterScale);
     }
 
     // Clamp radius by local turning radius: on a bend, a cross-section wider than the bend
@@ -1756,6 +1849,14 @@
     }
 
     addSpindleLayerToMaps(originLonLat, group);
+  }
+
+  // Re-diameters the currently shown spindle in place when the active map's zoom changes
+  // (see the "zoom" listeners on planMap/threeDMap above) -- a no-op if nothing is shown.
+  function rebuildActiveSpindleForZoom() {
+    if (activeSpindleRouteId && activeSpindleLonLat) {
+      showSpindleSegment(activeSpindleRouteId, activeSpindleLonLat);
+    }
   }
 
   // A thin glowing "line" rendered as a real tube (native GL line width is capped at 1px on
