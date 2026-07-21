@@ -709,13 +709,200 @@
   // never move the side panels above the switch buttons. Engine: MapLibre GL JS.
   var MapCenter = [40.7128, -74.0060];  // NYC, [lat, lon]
   var MapZoom = 12;
-  var MapTileUrls = [   // CARTO Light basemap (OSM's own tile server blocks requests without a Referer)
-    "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-    "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-    "https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-    "https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-  ];
-  var MapAttribution = '&copy; OpenStreetMap contributors &copy; CARTO';
+
+  // ===================== Editable map color palette =====================
+  // Change any hex value below to restyle BOTH Plan View and 3D View.
+  // This custom vector style has no symbol layers, so place and street labels stay hidden.
+  var MapPalette = {
+    background:      "#00142d",
+    water:           "#00142d",
+    waterway:        "#2e507a",
+    landResidential: "#081d38",
+    landCommercial:  "#0c2240",
+    landIndustrial:  "#11294b",
+    park:            "#031731",
+    airport:         "#11294b",
+    runway:          "#47709c",
+    building2D:      "#142d4f",
+    buildingLow:     "#142d4f",
+    buildingMid:     "#203d63",
+    buildingHigh:    "#47709c",
+    boundary:        "#264367",
+    rail:            "#264367",
+    minorRoad:       "#2e507a",
+    majorRoad:       "#47709c",
+    highway:         "#6f9bc7"
+  };
+
+  var MapVectorSourceUrl = "https://tiles.openfreemap.org/planet";
+  var MapAttribution = 'OpenFreeMap &copy; OpenMapTiles Data from &copy; OpenStreetMap contributors';
+
+  function buildMapStyle() {
+    return {
+      version: 8,
+      sources: {
+        openmaptiles: {
+          type: "vector",
+          url: MapVectorSourceUrl,
+          attribution: MapAttribution
+        }
+      },
+      layers: [
+        {
+          id: "map-background",
+          type: "background",
+          paint: { "background-color": MapPalette.background }
+        },
+        {
+          id: "map-land-residential",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "landuse",
+          filter: ["==", "class", "residential"],
+          paint: { "fill-color": MapPalette.landResidential, "fill-opacity": 0.72 }
+        },
+        {
+          id: "map-land-commercial",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "landuse",
+          filter: ["in", "class", "commercial", "retail"],
+          paint: { "fill-color": MapPalette.landCommercial, "fill-opacity": 0.78 }
+        },
+        {
+          id: "map-land-industrial",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "landuse",
+          filter: ["in", "class", "industrial", "railway"],
+          paint: { "fill-color": MapPalette.landIndustrial, "fill-opacity": 0.78 }
+        },
+        {
+          id: "map-parks",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "park",
+          paint: { "fill-color": MapPalette.park, "fill-opacity": 0.82 }
+        },
+        {
+          id: "map-airport-areas",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "aeroway",
+          filter: ["in", "class", "aerodrome", "apron", "heliport"],
+          paint: { "fill-color": MapPalette.airport, "fill-opacity": 0.88 }
+        },
+        {
+          id: "map-water",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "water",
+          paint: { "fill-color": MapPalette.water }
+        },
+        {
+          id: "map-waterways",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "waterway",
+          minzoom: 8,
+          paint: {
+            "line-color": MapPalette.waterway,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.35, 16, 1.5],
+            "line-opacity": 0.85
+          }
+        },
+        {
+          id: "map-buildings-2d",
+          type: "fill",
+          source: "openmaptiles",
+          "source-layer": "building",
+          minzoom: 13,
+          paint: { "fill-color": MapPalette.building2D, "fill-opacity": 0.72 }
+        },
+        {
+          id: "map-boundaries",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "boundary",
+          paint: {
+            "line-color": MapPalette.boundary,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 3, 0.45, 12, 1.1],
+            "line-opacity": 0.72,
+            "line-dasharray": [3, 2]
+          }
+        },
+        {
+          id: "map-rail",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", "class", "rail", "transit"],
+          minzoom: 10,
+          paint: {
+            "line-color": MapPalette.rail,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.45, 16, 1.5],
+            "line-opacity": 0.72
+          }
+        },
+        {
+          id: "map-minor-roads",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", "class", "minor", "service", "track", "path"],
+          minzoom: 11,
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": MapPalette.minorRoad,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 11, 0.35, 16, 1.45],
+            "line-opacity": 0.76
+          }
+        },
+        {
+          id: "map-major-roads",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", "class", "primary", "secondary", "tertiary"],
+          minzoom: 7,
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": MapPalette.majorRoad,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.55, 12, 1.25, 16, 3.1],
+            "line-opacity": 0.9
+          }
+        },
+        {
+          id: "map-highways",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "transportation",
+          filter: ["in", "class", "motorway", "trunk"],
+          minzoom: 4,
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": MapPalette.highway,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.65, 10, 1.35, 16, 4.2],
+            "line-opacity": 0.96
+          }
+        },
+        {
+          id: "map-runways",
+          type: "line",
+          source: "openmaptiles",
+          "source-layer": "aeroway",
+          filter: ["in", "class", "runway", "taxiway"],
+          minzoom: 9,
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": MapPalette.runway,
+            "line-width": ["interpolate", ["linear"], ["zoom"], 9, 0.8, 15, 4.5],
+            "line-opacity": 0.9
+          }
+        }
+      ]
+    };
+  }
 
   var planViewEl = document.getElementById("planView");
   var threeDViewEl = document.getElementById("threeDView");
@@ -730,13 +917,7 @@
     if (planMap) return;
     planMap = new maplibregl.Map({
       container: "planMap",
-      style: {
-        version: 8,
-        sources: {
-          basemap: { type: "raster", tiles: MapTileUrls, tileSize: 256, attribution: MapAttribution }
-        },
-        layers: [{ id: "basemap", type: "raster", source: "basemap" }]
-      },
+      style: buildMapStyle(),
       center: [MapCenter[1], MapCenter[0]],   // MapLibre wants [lon, lat]
       zoom: MapZoom
     });
@@ -858,8 +1039,8 @@
   // ==============================================================
 
   // ===================== 3D View (independent map) =====================
-  // The 3D map deliberately uses the exact CARTO Light raster basemap as Plan View.
-  // Terrain and neutral building extrusions add geometry without changing the map colors.
+  // The 3D map uses the same editable, label-free vector basemap as Plan View.
+  // Terrain and building extrusions add geometry while reusing MapPalette colors.
   var threeDMap = null;
   var threeDMapReady = false;
   var threeDRouteLayerOnById = {};
@@ -874,13 +1055,7 @@
     if (threeDMap) return;
     threeDMap = new maplibregl.Map({
       container: "threeDMap",
-      style: {
-        version: 8,
-        sources: {
-          basemap: { type: "raster", tiles: MapTileUrls, tileSize: 256, attribution: MapAttribution }
-        },
-        layers: [{ id: "basemap", type: "raster", source: "basemap" }]
-      },
+      style: buildMapStyle(),
       center: ThreeDInitialCamera.center,
       zoom: ThreeDInitialCamera.zoom,
       pitch: ThreeDInitialCamera.pitch,
@@ -906,15 +1081,9 @@
         });
       }
       threeDMap.setTerrain({ source: "terrain-dem", exaggeration: 1 });
-      if (!threeDMap.getSource("three-d-buildings-source")) {
-        threeDMap.addSource("three-d-buildings-source", {
-          type: "vector",
-          url: "https://tiles.openfreemap.org/planet"
-        });
-      }
       threeDMap.addLayer({
         id: "three-d-buildings",
-        source: "three-d-buildings-source",
+        source: "openmaptiles",
         "source-layer": "building",
         type: "fill-extrusion",
         minzoom: 13,
@@ -922,7 +1091,9 @@
         paint: {
           "fill-extrusion-color": [
             "interpolate", ["linear"], ["coalesce", ["get", "render_height"], 0],
-            0, "#ecece7", 120, "#d4d4cc", 300, "#b8b8ae"
+            0, MapPalette.buildingLow,
+            120, MapPalette.buildingMid,
+            300, MapPalette.buildingHigh
           ],
           "fill-extrusion-height": ["coalesce", ["get", "render_height"], 0],
           "fill-extrusion-base": ["coalesce", ["get", "render_min_height"], 0],
