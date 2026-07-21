@@ -927,6 +927,7 @@
       planMapReady = true;
       syncAllRouteLayers();     // apply any route selections made before the map existed
       initTrainsLayer();
+      loadSpindleData();        // idempotent -- also called from 3D View's load handler, whichever runs first wins
       document.dispatchEvent(new CustomEvent("platform:plan-map-ready"));
     });
   }
@@ -1249,11 +1250,19 @@
       }
     });
     planMap.on("click", "live-trains", function (e) {
-      var p = e.features[0].properties;
+      var f = e.features[0];
+      var p = f.properties;
       new maplibregl.Popup()
         .setLngLat(e.lngLat)
         .setHTML("<strong>" + p.route + " train</strong><br/>Next stop: " + p.nextStop)
         .addTo(planMap);
+      // Same spindle-reveal gesture as 3D View's train click -- see the
+      // "three-d-live-trains" handler below for the full explanation.
+      if (SpindleRouteIds.indexOf(p.route) !== -1 && stationMode && selectedRoutes[p.route]) {
+        activeSpindleTripId = p.tripId;
+        activeSpindleRouteId = p.route;
+        showSpindleSegment(p.route, f.geometry.coordinates);
+      }
     });
     bringSubwayToFront();
 
@@ -1440,14 +1449,22 @@
   // strength directly (no tapering envelope), so the cut ends of the window are flat/open
   // rather than pinching to a point. Data: Source/Subway_Signal_Strength/subway-web-100.min.json.
   //
-  // The path itself is built by connecting each route's stations in order (stationNames[route]
-  // in subway-web-100.min.json, already sorted by its own `position` field 0 -> 1, cross-checked
-  // against real coordinates) rather than from the RouteShape/NYCSubways/*.geojson shape files:
-  // those turned out to encode some routes (6, at least) as hundreds of disconnected/branching
-  // 2-point fragments with no reliable stitch order, whereas the station sequence is small,
-  // already correctly ordered, and maps 1:1 onto real coordinates via TrainStops (stop code ->
-  // lat/lon). The tradeoff is a coarser (station-to-station straight-line) path.
+  // The path itself comes from RouteShape/NYCSubways/Subway_{L,6}_official.geojson: the
+  // official NYC "Subway_view" ArcGIS layer (services6.arcgis.com/.../Subway_view/FeatureServer,
+  // per github.com/CityOfNewYork/nyc-geo-metadata/Metadata_SubwayLines.md), queried for the
+  // ROUTE codes covering each line (58 = "L"; 14/15/17 = "4-5-6"/"4-6"/"6" for the 6, since it
+  // shares track with 4/5 in places) and stitched into one ordered path by matching segment
+  // endpoints. That stitch is verified clean for both: exactly 2 open ends (a real line, no
+  // branching) and every segment used, terminating at the real stations at each end. This
+  // replaced an earlier attempt at a straight-line "station chain" spine (coarser) and, before
+  // that, a naive concatenation of RouteShape/NYCSubways/Subway_6.geojson's raw segments (which
+  // turned out to encode 6 as hundreds of disconnected/branching fragments with no reliable
+  // order at all).
   var SpindleRouteIds = ["L", "6"];   // which routes get the click-to-reveal spindle feature
+  var SpindleShapeUrls = {
+    L: "RouteShape/NYCSubways/Subway_L_official.geojson",
+    "6": "RouteShape/NYCSubways/Subway_6_official.geojson"
+  };
   var SpindleSignalJson = "Source/Subway_Signal_Strength/subway-web-100.min.json";
   var SpindleProvider = "AVERAGE";
   var SpindleWindowM = 500;          // shown length on EACH side of the clicked train
@@ -1478,48 +1495,41 @@
   function loadSpindleData() {
     if (spindleDataLoading || Object.keys(SpindleDataByRoute).length) return;
     spindleDataLoading = true;
-    Promise.all([
-      fetch(SpindleSignalJson).then(function (r) { return r.json(); }),
-      loadTrainStops()   // shared with the live-train layers -- gives real lat/lon per stop code
-    ]).then(function (results) {
-      var signalJson = results[0];
-      SpindleRouteIds.forEach(function (routeId) {
-        var stations = signalJson.stationNames[routeId];   // already ordered by its own `position`, 0 -> 1
-        var segs = signalJson.HiRes.providerLogs[routeId][SpindleProvider];
-        var signalValues = [];
-        var i = 0;
-        while (segs[i] !== undefined) { signalValues.push(segs[i].signal); i++; }
+    fetch(SpindleSignalJson).then(function (r) { return r.json(); }).then(function (signalJson) {
+      return Promise.all(SpindleRouteIds.map(function (routeId) {
+        return fetch(SpindleShapeUrls[routeId]).then(function (r) { return r.json(); }).then(function (shapeGeojson) {
+          var lonLat = shapeGeojson.features[0].geometry.coordinates;   // WGS84, already one ordered path
+          var segs = signalJson.HiRes.providerLogs[routeId][SpindleProvider];
+          var signalValues = [];
+          var i = 0;
+          while (segs[i] !== undefined) { signalValues.push(segs[i].signal); i++; }
+          if (lonLat.length < 2) return;
 
-        var lonLat = stations.map(function (st) {
-          var stop = TrainStops[st.code];
-          return stop ? [stop.lon, stop.lat] : null;
-        }).filter(Boolean);
-        if (lonLat.length < 2) return;
+          // Local flat-earth meters: east = +lon, south = -lat (matches MercatorCoordinate's
+          // own x/y sign convention directly, so the map transform needs no extra rotation).
+          var latRef = lonLat[Math.floor(lonLat.length / 2)][1];
+          var mPerDegLat = 111320;
+          var mPerDegLon = 111320 * Math.cos(latRef * Math.PI / 180);
+          var localPts = lonLat.map(function (pt) { return [pt[0] * mPerDegLon, -pt[1] * mPerDegLat]; });
 
-        // Local flat-earth meters: east = +lon, south = -lat (matches MercatorCoordinate's
-        // own x/y sign convention directly, so the map transform needs no extra rotation).
-        var latRef = lonLat[Math.floor(lonLat.length / 2)][1];
-        var mPerDegLat = 111320;
-        var mPerDegLon = 111320 * Math.cos(latRef * Math.PI / 180);
-        var localPts = lonLat.map(function (pt) { return [pt[0] * mPerDegLon, -pt[1] * mPerDegLat]; });
+          var cum = [0];
+          for (var j = 1; j < localPts.length; j++) {
+            var dx = localPts[j][0] - localPts[j - 1][0];
+            var dy = localPts[j][1] - localPts[j - 1][1];
+            cum.push(cum[j - 1] + Math.sqrt(dx * dx + dy * dy));
+          }
 
-        var cum = [0];
-        for (var j = 1; j < localPts.length; j++) {
-          var dx = localPts[j][0] - localPts[j - 1][0];
-          var dy = localPts[j][1] - localPts[j - 1][1];
-          cum.push(cum[j - 1] + Math.sqrt(dx * dx + dy * dy));
-        }
+          var maxSignal = 0;
+          signalValues.forEach(function (v) { if (v > maxSignal) maxSignal = v; });
+          if (maxSignal <= 0) maxSignal = 100;
 
-        var maxSignal = 0;
-        signalValues.forEach(function (v) { if (v > maxSignal) maxSignal = v; });
-        if (maxSignal <= 0) maxSignal = 100;
-
-        SpindleDataByRoute[routeId] = {
-          localPts: localPts, cum: cum, totalLen: cum[cum.length - 1],
-          signalValues: signalValues, maxSignal: maxSignal,
-          mPerDegLon: mPerDegLon, mPerDegLat: mPerDegLat
-        };
-      });
+          SpindleDataByRoute[routeId] = {
+            localPts: localPts, cum: cum, totalLen: cum[cum.length - 1],
+            signalValues: signalValues, maxSignal: maxSignal,
+            mPerDegLon: mPerDegLon, mPerDegLat: mPerDegLat
+          };
+        });
+      }));
     }).catch(function (err) { console.error("Signal spindle data failed to load:", err); })
       .then(function () { spindleDataLoading = false; });
   }
@@ -1666,7 +1676,7 @@
       group.add(buildGlowTube(ringPts, ringBrightness, gold, true, 0.3));
     }
 
-    addThreeJsLayerToMap(originLonLat, group);
+    addSpindleLayerToMaps(originLonLat, group);
   }
 
   // A thin glowing "line" rendered as a real tube (native GL line width is capped at 1px on
@@ -1698,29 +1708,32 @@
   }
 
   function clearSpindleSegment() {
-    if (threeDMap && threeDMap.getLayer && threeDMap.getLayer("signal-spindle-3d")) {
-      threeDMap.removeLayer("signal-spindle-3d");
-    }
+    [planMap, threeDMap].forEach(function (map) {
+      if (map && map.getLayer && map.getLayer("signal-spindle-3d")) {
+        map.removeLayer("signal-spindle-3d");
+      }
+    });
   }
 
-  // Bridges a Three.js scene into a MapLibre custom WebGL layer. Because the spindle's
-  // geometry is already authored directly in MercatorCoordinate's own axis convention
-  // (X=east, Y=south, Z=altitude), the map transform below is a plain translate + uniform
-  // scale -- no extra rotation matrices needed to reconcile a "Y-up" authoring convention.
-  function addThreeJsLayerToMap(originLonLat, object3d) {
-    clearSpindleSegment();   // only one segment shown at a time
+  // Bridges a Three.js scene into a MapLibre custom WebGL layer on ONE map instance. Because
+  // the spindle's geometry is already authored directly in MercatorCoordinate's own axis
+  // convention (X=east, Y=south, Z=altitude), the map transform below is a plain translate +
+  // uniform scale -- no extra rotation matrices needed to reconcile a "Y-up" authoring
+  // convention. This same transform is geography-only (no per-map state), so it works
+  // unchanged for either map.
+  function addThreeJsLayerToMap(map, originLonLat, object3d) {
     var originMercator = maplibregl.MercatorCoordinate.fromLngLat(originLonLat, 0);
     var scale = originMercator.meterInMercatorCoordinateUnits();
 
-    threeDMap.addLayer({
+    map.addLayer({
       id: "signal-spindle-3d",
       type: "custom",
       renderingMode: "3d",
-      onAdd: function (map, gl) {
+      onAdd: function (mapArg, gl) {
         this.camera = new THREE.Camera();
         this.scene = new THREE.Scene();
         this.scene.add(object3d);   // unlit line material -- no scene lights needed
-        this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ canvas: mapArg.getCanvas(), context: gl, antialias: true });
         this.renderer.autoClear = false;
       },
       render: function (gl, matrix) {
@@ -1731,9 +1744,19 @@
         this.camera.projectionMatrix = m.multiply(l);
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
-        threeDMap.triggerRepaint();
+        map.triggerRepaint();
       }
     });
+  }
+
+  // Shows the same spindle on both Plan View and 3D View (whichever have been opened/are
+  // ready), so it stays visible switching between them. Each map gets its own clone of the
+  // Three.js object tree -- a single Object3D can only belong to one Scene at a time, but
+  // clone(true) shares the same underlying geometry/material, so this doesn't duplicate data.
+  function addSpindleLayerToMaps(originLonLat, object3d) {
+    clearSpindleSegment();   // only one segment shown at a time, on either map
+    if (planMap && planMapReady) addThreeJsLayerToMap(planMap, originLonLat, object3d.clone(true));
+    if (threeDMap && threeDMapReady) addThreeJsLayerToMap(threeDMap, originLonLat, object3d.clone(true));
   }
   // ======================================================================
 
