@@ -4,7 +4,7 @@
 
 This Version 2 rule calculates modeled path-loss changes once per second along an LGA flight track. It does not calculate measured received power in dBm.
 
-Version 1 rules, workbook, flight data, backend, and web interface remain unchanged. Version 2 building calculations are computational only: they must not change building colors, opacity, filters, layers, feature state, outlines, labels, or any other 2D/3D map styling.
+Version 1 rules, workbook, source flight data, and existing visual presentation remain preserved. Version 2 is integrated as separate derived API data and a browser-side clock. Version 2 building calculations are computational only: they must not change building colors, opacity, filters, layers, feature state, outlines, labels, or any other 2D/3D map styling.
 
 ## Processing overview
 
@@ -28,6 +28,15 @@ recalculate and finalize the one-second derived interval
 ```
 
 The original A and B observations are never overwritten.
+
+## Website integration and request timing
+
+- The server requests OpenSky once every 30 seconds.
+- The website requests the local `/api/flights` endpoint every 5 seconds. These local reads use cached server state and do not request OpenSky or consume additional OpenSky credits.
+- Each `/api/flights` flight may include a separate `signal_v2` object with the current derived point and the 30 predicted one-second points.
+- The browser advances `signal_v2.live_current` once per second and dispatches `platform:flight-signal-v2-tick`. This clock does not make a network request and does not alter any building style.
+- Finalized A-to-B history is available from `/api/signal-v2?icao24=ICAO24&since=UNIX_SECONDS`. `since` is optional and the endpoint returns only points newer than it, allowing later visualizations to append reconciled history without repeatedly downloading the entire flight.
+- Predicted points are provisional. Only observed and A-to-B interpolated points appear in the reconciled history endpoint.
 
 ## Time model
 
@@ -224,6 +233,7 @@ frequency_confidence
 site_id
 slant_distance_km
 fspl_db
+building_data_status
 building_blocked
 blocking_building_count
 dominant_building_id
@@ -252,5 +262,4 @@ calculation_method = fspl_plus_dominant_building_diffraction_v2
 - A clear path produces zero building diffraction loss.
 - A blocked test path produces deterministic positive loss.
 - Missing building heights use 10 m only in calculation metadata.
-- No Version 1 or UI file is modified by implementing this rule.
-
+- Version 1 rule/workbook values are not overwritten, and existing UI/building visual styles remain unchanged.

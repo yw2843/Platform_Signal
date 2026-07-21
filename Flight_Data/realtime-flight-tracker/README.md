@@ -15,8 +15,9 @@ The airport relationship, flight phase, and frequency are inferred by transparen
 - Probable flights: amber aircraft/halo and dashed trail.
 - Confirmed flights: green aircraft/halo and solid trail.
 - Flight details appear only after an aircraft or route is clicked.
-- No signal-loss calculations in this version.
-- The assumed LGA transmitter location is reserved for later signal-loss work.
+- Version 1 fields remain available unchanged; Version 2 adds separate one-second phase/frequency/signal-loss records.
+- Version 2 uses a documented synthetic LGA reference site and calculation-only OpenFreeMap building geometry.
+- Signal values are available to the browser and API, but visual signal graphics remain deferred.
 - Data beyond the current 40 NM phase/frequency rules is labeled `Future Research`.
 
 ## Architecture
@@ -31,6 +32,8 @@ Python backend (server.py)
   - buffers observations for one hour
   - classifies probable/confirmed LGA traffic
   - applies phase/frequency rules only within 40 NM
+  - predicts 30 one-second V2 positions and reconciles them after the next observation
+  - calculates FSPL plus dominant-building diffraction for one V2 frequency per phase
        |
        | local /api/flights, read every 5 seconds
        v
@@ -39,6 +42,7 @@ Original Platform Signal browser UI
   - Section mode preserves subway signal routes and adds selected-flight altitude profiles
   - L/6 trains, aircraft, routes, terrain, and buildings
   - click-only details table
+  - advances cached V2 signal data every second without another HTTP or OpenSky request
 ```
 
 The browser never receives the OpenSky client secret. Multiple browser windows share the same backend response and do not multiply OpenSky API usage.
@@ -249,7 +253,15 @@ No permanent flight table covers the map. Clicking an aircraft or its trail open
 - Inferred service and representative frequency.
 - Last position time and route observation count.
 
-Signal-quality fields are intentionally absent until the separate signal-loss design is approved.
+Signal-quality graphics and visible detail rows remain intentionally absent until the later visualization step. The browser already receives the separate `signal_v2` timeline and emits `platform:flight-signal-v2-tick` once per second.
+
+## Version 2 signal APIs
+
+- `/api/flights` includes a separate `signal_v2` object for each eligible flight. The website continues reading this local endpoint every five seconds.
+- `/api/signal-v2?icao24=abc123` returns finalized observed and reconciled one-second history for that flight.
+- `/api/signal-v2?icao24=abc123&since=UNIX_SECONDS` returns only finalized points newer than `since`.
+
+The five-second local reads never trigger OpenSky. Only the centralized 30-second polling service requests OpenSky. Predicted values are provisional until the actual B observation replaces the A-to-B interval with interpolation.
 
 ## State-vector conversions
 

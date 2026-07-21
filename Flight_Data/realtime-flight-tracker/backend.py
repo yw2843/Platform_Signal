@@ -13,6 +13,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from v2_signal import NoBuildingProvider, SignalV2Engine
+
 
 LGA_LAT = 40.77724222
 LGA_LON = -73.87260555
@@ -107,9 +109,10 @@ class AircraftRecord:
 
 
 class FlightTracker:
-    def __init__(self) -> None:
+    def __init__(self, building_provider: NoBuildingProvider | None = None) -> None:
         self._lock = threading.RLock()
         self._records: dict[str, AircraftRecord] = {}
+        self._signal_v2 = SignalV2Engine(building_provider)
         self._source_time: int | None = None
         self._service_status: dict[str, Any] = {
             "state": "starting",
@@ -179,6 +182,8 @@ class FlightTracker:
             "latitude": latitude,
             "longitude": longitude,
             "altitude_m": altitude_m,
+            "baro_altitude_m": baro_altitude_m,
+            "geo_altitude_m": geo_altitude_m,
             "altitude_ft": altitude_ft,
             "speed_kt": speed_kt,
             "heading_deg": _number(_safe_index(state, 10)),
@@ -193,6 +198,12 @@ class FlightTracker:
         record.last_seen = received_at
         self._trim_history(record, received_at)
         self._update_classification(record, observation)
+        self._signal_v2.ingest_actual(
+            record.icao24,
+            observation,
+            record.direction,
+            record.status,
+        )
 
     def _update_classification(self, record: AircraftRecord, current: dict[str, Any]) -> None:
         distance_nm = current["distance_nm"]
@@ -343,6 +354,11 @@ class FlightTracker:
                 expired.append(icao24)
         for icao24 in expired:
             del self._records[icao24]
+        self._signal_v2.expire(set(self._records))
+
+    def signal_history(self, icao24: str, since: float | None = None) -> dict[str, Any] | None:
+        with self._lock:
+            return self._signal_v2.history(icao24.strip().lower(), since)
 
     def snapshot(self, now: float | None = None) -> dict[str, Any]:
         now = now or time.time()
@@ -380,6 +396,7 @@ class FlightTracker:
                             }
                             for point in record.history
                         ],
+                        "signal_v2": self._signal_v2.snapshot(record.icao24, now),
                     }
                 )
             flights.sort(key=lambda item: (item["status"] != "confirmed", item["current"]["distance_nm"]))

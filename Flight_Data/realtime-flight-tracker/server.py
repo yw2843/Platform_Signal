@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import socket
 import threading
@@ -9,9 +10,10 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from backend import FlightTracker, OpenSkyClient, OpenSkyError, PollingService
+from v2_signal import OpenMapTilesBuildingProvider
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -42,9 +44,32 @@ class TrackerRequestHandler(BaseHTTPRequestHandler):
     tracker: FlightTracker
 
     def do_GET(self) -> None:  # noqa: N802
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/flights":
             self._send_json(self.tracker.snapshot())
+            return
+        if path == "/api/signal-v2":
+            query = parse_qs(parsed.query)
+            icao24 = str((query.get("icao24") or [""])[0]).strip().lower()
+            if not icao24:
+                self._send_json({"error": "icao24 is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            since: float | None = None
+            if query.get("since"):
+                try:
+                    since = float(query["since"][0])
+                except (TypeError, ValueError):
+                    self._send_json({"error": "since must be a Unix timestamp"}, HTTPStatus.BAD_REQUEST)
+                    return
+                if not math.isfinite(since):
+                    self._send_json({"error": "since must be a finite Unix timestamp"}, HTTPStatus.BAD_REQUEST)
+                    return
+            history = self.tracker.signal_history(icao24, since)
+            if history is None:
+                self._send_json({"error": "flight not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(history)
             return
         if path == "/api/health":
             snapshot = self.tracker.snapshot()
@@ -93,9 +118,9 @@ class TrackerRequestHandler(BaseHTTPRequestHandler):
             return None
         return candidate
 
-    def _send_json(self, payload: object) -> None:
+    def _send_json(self, payload: object, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        self.send_response(HTTPStatus.OK)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
@@ -146,7 +171,7 @@ def local_ipv4_addresses() -> list[str]:
 
 def main() -> int:
     args = parse_args()
-    tracker = FlightTracker()
+    tracker = FlightTracker(building_provider=OpenMapTilesBuildingProvider())
     poller: PollingService | None = None
 
     if args.no_poll:

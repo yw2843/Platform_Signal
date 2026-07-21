@@ -70,6 +70,14 @@ class FlightTrackerTests(unittest.TestCase):
         self.assertEqual(flight["current"]["phase"], "final_approach")
         self.assertEqual(flight["current"]["frequency_mhz"], 118.7)
         self.assertAlmostEqual(flight["track"][-1]["altitude_ft"], 2500, delta=1)
+        self.assertEqual(flight["signal_v2"]["version"], 2)
+        self.assertEqual(len(flight["signal_v2"]["predicted_timeline"]), 30)
+        self.assertEqual(
+            flight["signal_v2"]["current"]["most_likely_frequency_mhz"],
+            118.7,
+        )
+        history = self.tracker.signal_history("ABC123", since=self.base + 88)
+        self.assertEqual([point["timestamp"] for point in history["points"]], [self.base + 89, self.base + 90])
 
     def test_departure_becomes_confirmed_after_initial_zone(self) -> None:
         points = [
@@ -105,10 +113,14 @@ class FlightTrackerTests(unittest.TestCase):
                 index * 30,
             )
 
-        current = self.tracker.snapshot(now=self.base + 120)["flights"][0]["current"]
+        flight = self.tracker.snapshot(now=self.base + 120)["flights"][0]
+        current = flight["current"]
         self.assertEqual(current["phase"], "outside_current_rule")
         self.assertIsNone(current["frequency_mhz"])
         self.assertEqual(current["frequency_status"], "Future Research")
+        self.assertEqual(flight["signal_v2"]["current"]["inferred_phase"], "unknown")
+        self.assertIsNone(flight["signal_v2"]["current"]["most_likely_frequency_mhz"])
+        self.assertIsNone(flight["signal_v2"]["current"]["total_loss_db"])
 
 
 if __name__ == "__main__":

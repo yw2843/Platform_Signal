@@ -280,6 +280,7 @@
       if (!response.ok) throw new Error("Tracker API returned HTTP " + response.status);
       var payload = await response.json();
       state.flights = payload.flights || [];
+      advanceSignalClock();
       renderStatus(payload);
       renderFlightButtons();
       updateFlightLayers();
@@ -287,6 +288,42 @@
     } catch (error) {
       setConnection("error", "Local API error");
       showMessage(error.message || String(error));
+    }
+  }
+
+  function selectSignalPoint(flight, nowSeconds) {
+    var signal = flight.signal_v2;
+    if (!signal) return null;
+    var selected = signal.current || null;
+    (signal.predicted_timeline || []).some(function (point) {
+      if (Number(point.timestamp) > nowSeconds) return true;
+      selected = point;
+      return false;
+    });
+    return selected;
+  }
+
+  function advanceSignalClock() {
+    var nowSeconds = Date.now() / 1000;
+    var ticks = [];
+    state.flights.forEach(function (flight) {
+      if (!flight.signal_v2) return;
+      flight.signal_v2.live_current = selectSignalPoint(flight, nowSeconds);
+      if (flight.signal_v2.live_current) {
+        ticks.push({
+          icao24: flight.icao24,
+          signal: flight.signal_v2.live_current
+        });
+      }
+    });
+    window.dispatchEvent(new CustomEvent("platform:flight-signal-v2-tick", {
+      detail: { generatedAt: nowSeconds, flights: ticks }
+    }));
+    if (state.selectedIcao24 && ui.detailsPanel.classList.contains("open")) {
+      var selected = state.flights.find(function (flight) {
+        return flight.icao24 === state.selectedIcao24;
+      });
+      if (selected) renderDetails(selected);
     }
   }
 
@@ -375,6 +412,9 @@
 
   function renderDetails(flight) {
     var current = flight.current;
+    var signal = flight.signal_v2
+      ? (flight.signal_v2.live_current || flight.signal_v2.current)
+      : null;
     ui.detailsStatus.textContent = capitalize(flight.status) + " - " + capitalize(flight.direction);
     ui.detailsStatus.style.color = flight.status === "confirmed" ? "#2ed47a" : "#f5a623";
     ui.detailsCallsign.textContent = flight.callsign || flight.icao24.toUpperCase();
@@ -396,15 +436,39 @@
       ["Service", current.service ? capitalize(current.service) : "--"],
       ["Frequency", frequency || "--"],
       ["Matched rule", current.matched_rule_id || "--"],
-      ["Signal quality", "Future signal-loss model"],
       ["Last position", formatDateTime(current.timestamp)]
     ];
+    if (signal) {
+      var buildingPath = "Unavailable - FSPL only";
+      if (signal.building_data_status === "available" || signal.building_data_status === "partial") {
+        buildingPath = signal.building_blocked
+          ? "Blocked - " + (signal.blocking_building_count || 1) + " intersecting"
+          : "Clear";
+        if (signal.building_data_status === "partial") buildingPath += " (partial data)";
+      }
+      rows.push(
+        ["V2 signal point", label(signal.position_status)],
+        ["V2 phase", label(signal.inferred_phase)],
+        ["V2 frequency", formatNumber(signal.most_likely_frequency_mhz, 1, " MHz")],
+        ["Modeled total loss", formatNumber(signal.total_loss_db, 2, " dB")],
+        ["Change vs phase strongest", formatSigned(signal.relative_signal_phase_db, 2, " dB")],
+        ["Phase relative power", formatNumber(signal.relative_power_phase_percent, 1, "%")],
+        ["Change vs flight strongest", formatSigned(signal.relative_signal_flight_db, 2, " dB")],
+        ["Flight relative power", formatNumber(signal.relative_power_flight_percent, 1, "%")],
+        ["Free-space loss", formatNumber(signal.fspl_db, 2, " dB")],
+        ["Building loss", formatNumber(signal.building_loss_db, 2, " dB")],
+        ["Building path", buildingPath],
+        ["V2 signal time", formatDateTime(signal.timestamp)]
+      );
+    } else {
+      rows.push(["V2 signal", "Waiting for an eligible phase and position"]);
+    }
     ui.detailsBody.replaceChildren.apply(ui.detailsBody, rows.map(function (row) {
       return detailRow(row[0], row[1]);
     }));
     ui.detailsNote.textContent = current.phase_scope === "outside_current_rule"
       ? "Beyond 40 NM is reserved for Future Research; no frequency rule is applied."
-      : "Phase and frequency are inferred by the local prototype rules, not a live ATC handoff.";
+      : "V2 values are modeled path loss, not measured dBm. Lower total loss is stronger; 0 dB relative change is the strongest modeled point in the selected phase or flight.";
   }
 
   function detailRow(key, value) {
@@ -527,4 +591,5 @@
 
   refreshFlights();
   window.setInterval(refreshFlights, 5000);
+  window.setInterval(advanceSignalClock, 1000);
 })();
