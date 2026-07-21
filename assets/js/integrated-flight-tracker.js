@@ -42,8 +42,15 @@
     planOverlay: null,
     threeDOverlay: null,
     subwayRoutes3D: null,
+    selectedTrainRouteId: null,
     messageTimer: null
   };
+
+  var SUBWAY_OUTLINE_COLOR = [242, 242, 242, 235];   // #f2f2f2 -- matches SubwayOutlineColor in index.html
+  var SUBWAY_LINE_WIDTH = 6;
+  var SUBWAY_LINE_WIDTH_SELECTED = 3;                 // thinner while a train on this route is selected
+  var SUBWAY_OUTLINE_WIDTH = 9;
+  var SUBWAY_OUTLINE_WIDTH_SELECTED = 16;             // thicker while a train on this route is selected
 
   function hexToRgba(hex, alpha) {
     var value = parseInt(String(hex).replace("#", ""), 16);
@@ -59,17 +66,34 @@
   // since index.html already owns loading/reprojecting the route shapes.
   function makeThreeDSubwayLayer() {
     if (!state.subwayRoutes3D || !state.subwayRoutes3D.features.length) return [];
+    var selectedRouteId = state.selectedTrainRouteId;
+    function isSelected(feature) { return feature.properties.routeId === selectedRouteId; }
     return [
+      // Thin light-grey casing underneath every route line; thickens when a train on
+      // that route is selected (mirrors setRouteHighlighted() for Plan View in index.html).
       new deck.GeoJsonLayer({
-        id: "three-d-subway-lines",
+        id: "three-d-subway-lines-casing",
         data: state.subwayRoutes3D,
-        getLineColor: function (feature) { return hexToRgba(feature.properties.color, 235); },
-        getLineWidth: 6,
+        getLineColor: SUBWAY_OUTLINE_COLOR,
+        getLineWidth: function (feature) { return isSelected(feature) ? SUBWAY_OUTLINE_WIDTH_SELECTED : SUBWAY_OUTLINE_WIDTH; },
         lineWidthUnits: "pixels",
         lineJointRounded: true,
         lineCapRounded: true,
         pickable: false,
-        parameters: { depthTest: false }
+        parameters: { depthTest: false },
+        updateTriggers: { getLineWidth: selectedRouteId }
+      }),
+      new deck.GeoJsonLayer({
+        id: "three-d-subway-lines",
+        data: state.subwayRoutes3D,
+        getLineColor: function (feature) { return hexToRgba(feature.properties.color, 235); },
+        getLineWidth: function (feature) { return isSelected(feature) ? SUBWAY_LINE_WIDTH_SELECTED : SUBWAY_LINE_WIDTH; },
+        lineWidthUnits: "pixels",
+        lineJointRounded: true,
+        lineCapRounded: true,
+        pickable: false,
+        parameters: { depthTest: false },
+        updateTriggers: { getLineWidth: selectedRouteId }
       })
     ];
   }
@@ -260,6 +284,11 @@
     if (state.threeDOverlay) {
       // Subway layer goes last so it also paints on top of flight trails/planes.
       state.threeDOverlay.setProps({ layers: makeFlightLayers("3d").concat(makeThreeDSubwayLayer()) });
+      // The subway layers above register as native layers and can land above the live
+      // train dots' native circle layer -- reassert that trains render on top of them.
+      if (window.ThreeDView && typeof window.ThreeDView.bringLiveTrainsToFront === "function") {
+        window.ThreeDView.bringLiveTrainsToFront();
+      }
     }
   }
 
@@ -503,8 +532,14 @@
     state.subwayRoutes3D = (event.detail && event.detail.featureCollection) || null;
     updateFlightLayers();
   });
-  document.addEventListener("platform:train-selected", function () {
+  document.addEventListener("platform:train-selected", function (event) {
     if (state.selectedIcao24) closeDetails();
+    state.selectedTrainRouteId = (event.detail && event.detail.route) || null;
+    updateFlightLayers();
+  });
+  document.addEventListener("platform:train-deselected", function () {
+    state.selectedTrainRouteId = null;
+    updateFlightLayers();
   });
   document.addEventListener("platform:subways-updated", function (event) {
     var detail = event.detail || {};
