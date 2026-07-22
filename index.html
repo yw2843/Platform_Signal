@@ -210,6 +210,12 @@
     height: 100%;
   }
   #planView, #threeDView { display: none; }
+  /* ---- Section View theme (dark). Scoped to #sectionView so control panels and the
+     Plan/3D views keep their own colors (--na etc.) unchanged. ---- */
+  #sectionView { background: #00142d; }
+  #sectionView #groundLine,
+  #sectionView #ticks { stroke: #f2f2f2; stroke-width: 2; }
+  #sectionView text { fill: #f2f2f2; }
   /* Backdrop behind the MapLibre canvas itself, so that when "Hide map" mode dims the
      basemap's own background layer down to BasemapHiddenOpacity (see applyBasemapHidden),
      whatever shows through underneath is already black/dark instead of the page's default
@@ -434,7 +440,7 @@
   root.setProperty("--border-gray", Border_Gray);
 
   // ===================== Ground / scene ===============
-  var GroundColor = "#e5e5e5";   // fill color of the ground
+  var GroundColor = "#00142d";   // fill color of the ground (dark blue, matches Section View background)
   var GroundLocation = 2 / 3;    // top of the ground, as a fraction of window height
                                  // (2/3 keeps the ground in the lower 1/3 of the window)
 
@@ -1552,6 +1558,28 @@
       .catch(function () { /* route shape unavailable */ });
   });
 
+  // ---- 3D View only: routes with a real elevation profile use that instead of the flat
+  // (z=0) reprojection of their Plan View shape -- see RouteShape/NYCSubways/Subway_L_3D.geojson,
+  // whose LineString coordinates are already WGS84 [lon, lat, z] (z = track elevation in
+  // meters, roughly relative to sea level, matching how flight altitude_m is fed straight
+  // into deck.gl in integrated-flight-tracker.js). Only L has this data so far; routes
+  // without an entry here keep falling back to the flat broadcast in
+  // broadcastThreeDSubwayRoutes below. Plan View is unaffected -- it always uses the flat
+  // EPSG:2263 shape from routeGeoJsonById, never this. ----
+  var RouteThreeDShapeUrls = { L: "RouteShape/NYCSubways/Subway_L_3D.geojson" };
+  var routeGeoJson3DById = {};   // route id -> WGS84 GeoJSON LineString Feature with real z
+  Object.keys(RouteThreeDShapeUrls).forEach(function (routeId) {
+    fetch(RouteThreeDShapeUrls[routeId])
+      .then(function (res) { return res.json(); })
+      .then(function (fc) {
+        var lineFeature = fc.features.filter(function (f) { return f.geometry.type === "LineString"; })[0];
+        if (!lineFeature) return;
+        routeGeoJson3DById[routeId] = lineFeature;
+        syncThreeDRouteLayer(routeId);   // re-broadcast now that real elevation is available
+      })
+      .catch(function () { /* elevation shape unavailable -- flat fallback stays in effect */ });
+  });
+
   function syncRouteLayer(routeId) {
     var geo = routeGeoJsonById[routeId];
     if (!geo || !planMapReady) return;   // no shape data for this route, or map not built yet
@@ -1804,7 +1832,11 @@
       .filter(function (routeId) { return selectedRoutes[routeId] && routeGeoJsonById[routeId]; })
       .map(function (routeId) {
         var route = routes.filter(function (r) { return r.id === routeId; })[0];
-        var feature = reprojectGeoJson(routeGeoJsonById[routeId]);
+        // Prefer the real-elevation WGS84 shape (already correct CRS, z = meters) over the
+        // flat Plan View shape reprojected at z=0 -- see routeGeoJson3DById above.
+        var feature = routeGeoJson3DById[routeId]
+          ? JSON.parse(JSON.stringify(routeGeoJson3DById[routeId]))
+          : reprojectGeoJson(routeGeoJsonById[routeId]);
         feature.properties = Object.assign({}, feature.properties, { routeId: routeId, color: route.color });
         return feature;
       });
