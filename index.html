@@ -157,31 +157,22 @@
   #section-signal-layout {
     display: none;
     align-items: center;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 3px;
-    margin-top: 10px;
-    padding: 7px;
+    margin: 0;
+    padding: 3px;
     border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.16));
-    border-radius: 8px;
+    border-radius: 10px;
     background: rgba(255, 255, 255, 0.05);
   }
   body[data-view-mode="section"] #section-signal-layout { display: flex; }
-  #section-signal-layout .layout-label {
-    flex-basis: 100%;
-    padding: 0 3px 4px;
-    color: var(--interface-muted, #9eabb4);
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
   #section-signal-layout button {
-    flex: 1 1 105px;
+    flex: 0 0 auto;
     border: 0;
-    border-radius: 5px;
-    padding: 6px 10px;
+    border-radius: 8px;
+    padding: 7px 9px;
     background: transparent;
-    color: #3f4f5a;
+    color: var(--interface-muted, #a8bdcb);
     font: inherit;
     font-size: 12px;
     font-weight: 700;
@@ -270,11 +261,68 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="eyebrow">LaGuardia &middot; KLGA / NYC Subway</span>
-      <h1>Platform Signal Realtime Tracker</h1>
+    <div class="topbar-brand-summary">
+      <div class="brand">
+        <span class="eyebrow">LaGuardia &middot; KLGA / NYC Subway</span>
+        <h1>InfraWave</h1>
+      </div>
+      <section class="map-summary" aria-live="polite">
+        <div class="summary-group" aria-label="Realtime flights">
+          <span class="summary-title">Flights</span>
+          <div><strong id="confirmed-count">0</strong><span>confirmed</span></div>
+          <div><strong id="probable-count">0</strong><span>probable</span></div>
+          <div><strong id="last-update">--</strong><span>OpenSky update</span></div>
+        </div>
+        <div class="summary-divider" aria-hidden="true"></div>
+        <div class="summary-group" aria-label="Realtime subways">
+          <span class="summary-title">Subways</span>
+          <div><strong id="subway-count">0</strong><span>L / 6 trains</span></div>
+          <div><strong id="subway-lines">L + 6</strong><span>visible lines</span></div>
+          <div><strong id="subway-update">--</strong><span>MTA update</span></div>
+        </div>
+      </section>
     </div>
     <div class="topbar-actions">
+      <div id="controls">
+        <div id="section-signal-layout" role="group" aria-label="Signal visualization layout">
+          <button type="button" data-signal-layout="along-route" aria-pressed="false">Along Route</button>
+          <button type="button" data-signal-layout="separate-plot" aria-pressed="true">Separate Plot</button>
+        </div>
+
+        <div class="panel collapsed">
+          <div class="panel-header" role="button" tabindex="0" aria-expanded="false">Route Filters</div>
+          <div class="panel-box">
+            <div class="group-label">Subways</div>
+            <div class="btn-row" id="row-subways"></div>
+            <div class="group-label">Realtime Flights</div>
+            <div class="btn-row flight-picker" id="row-planes">
+              <span class="filter-placeholder">Waiting for OpenSky...</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel collapsed">
+          <div class="panel-header" role="button" tabindex="0" aria-expanded="false">Data Filters</div>
+          <div class="panel-box filter-groups">
+            <div class="group-label">Flight status</div>
+            <div class="filter-options" id="flight-status-filter">
+              <button class="filter-option selected" type="button" data-value="all">All</button>
+              <button class="filter-option" type="button" data-value="confirmed">Confirmed</button>
+              <button class="filter-option" type="button" data-value="probable">Probable</button>
+            </div>
+            <div class="group-label">Direction</div>
+            <div class="filter-options" id="flight-direction-filter">
+              <button class="filter-option selected" type="button" data-value="all">All</button>
+              <button class="filter-option" type="button" data-value="arrival">Arrival</button>
+              <button class="filter-option" type="button" data-value="departure">Departure</button>
+            </div>
+            <div class="group-label">Signal source</div>
+            <div id="source-box"></div>
+            <div class="group-label">Signal tubes</div>
+            <div class="filter-options" id="signal-tubes-carrier" role="group" aria-label="Signal tube carrier"></div>
+          </div>
+        </div>
+      </div>
       <div class="connection" id="connection" title="OpenSky connection status">
         <span class="status-dot" id="status-dot"></span>
         <span id="status-label">Starting</span>
@@ -305,22 +353,6 @@
     </div>
   </section>
 
-  <section class="map-summary" aria-live="polite">
-    <div class="summary-group" aria-label="Realtime flights">
-      <span class="summary-title">Flights</span>
-      <div><strong id="confirmed-count">0</strong><span>confirmed</span></div>
-      <div><strong id="probable-count">0</strong><span>probable</span></div>
-      <div><strong id="last-update">--</strong><span>OpenSky update</span></div>
-    </div>
-    <div class="summary-divider" aria-hidden="true"></div>
-    <div class="summary-group" aria-label="Realtime subways">
-      <span class="summary-title">Subways</span>
-      <div><strong id="subway-count">0</strong><span>L / 6 trains</span></div>
-      <div><strong id="subway-lines">L + 6</strong><span>visible lines</span></div>
-      <div><strong id="subway-update">--</strong><span>MTA update</span></div>
-    </div>
-  </section>
-
   <div id="sectionView">
     <svg id="stage" xmlns="http://www.w3.org/2000/svg">
       <rect id="ground"></rect>
@@ -346,47 +378,6 @@
       <button type="button" data-camera-preset="city">Full City</button>
       <button type="button" data-camera-preset="reset">Reset</button>
       <div id="threeD-camera-hint">Drag to move · right-drag to rotate/tilt · scroll to zoom/raise camera</div>
-    </div>
-  </div>
-
-  <div id="controls">
-    <div class="panel">
-      <div class="panel-header">Route Filters</div>
-      <div class="panel-box">
-        <div class="group-label">Subways</div>
-        <div class="btn-row" id="row-subways"></div>
-        <div class="group-label">Realtime Flights</div>
-        <div class="btn-row flight-picker" id="row-planes">
-          <span class="filter-placeholder">Waiting for OpenSky...</span>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel">
-      <div class="panel-header">Data Filters</div>
-      <div class="panel-box filter-groups">
-        <div class="group-label">Flight status</div>
-        <div class="filter-options" id="flight-status-filter">
-          <button class="filter-option selected" type="button" data-value="all">All</button>
-          <button class="filter-option" type="button" data-value="confirmed">Confirmed</button>
-          <button class="filter-option" type="button" data-value="probable">Probable</button>
-        </div>
-        <div class="group-label">Direction</div>
-        <div class="filter-options" id="flight-direction-filter">
-          <button class="filter-option selected" type="button" data-value="all">All</button>
-          <button class="filter-option" type="button" data-value="arrival">Arrival</button>
-          <button class="filter-option" type="button" data-value="departure">Departure</button>
-        </div>
-        <div class="group-label">Signal source</div>
-        <div id="source-box"></div>
-        <div class="group-label">Signal tubes</div>
-        <div class="filter-options" id="signal-tubes-carrier" role="group" aria-label="Signal tube carrier"></div>
-        <div id="section-signal-layout" role="group" aria-label="Signal visualization layout">
-          <span class="layout-label">Section signal layout</span>
-          <button type="button" data-signal-layout="along-route" aria-pressed="false">Along Route</button>
-          <button type="button" data-signal-layout="separate-plot" aria-pressed="true">Separate Plot</button>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -604,8 +595,24 @@
 
   // ----- Collapse / expand a panel by clicking its header -----
   document.querySelectorAll(".panel-header").forEach(function (h) {
-    h.addEventListener("click", function () {
-      h.parentElement.classList.toggle("collapsed");
+    function togglePanel() {
+      var panel = h.parentElement;
+      var willOpen = panel.classList.contains("collapsed");
+      document.querySelectorAll("#controls .panel").forEach(function (otherPanel) {
+        otherPanel.classList.add("collapsed");
+        otherPanel.querySelector(".panel-header").setAttribute("aria-expanded", "false");
+      });
+      if (willOpen) {
+        panel.classList.remove("collapsed");
+        h.setAttribute("aria-expanded", "true");
+      }
+    }
+    h.addEventListener("click", togglePanel);
+    h.addEventListener("keydown", function (event) {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        togglePanel();
+      }
     });
   });
 
@@ -908,7 +915,9 @@
     var maxAltitude = Math.max.apply(null, altitudes.concat(signalAltitudes).concat([1000]));
     maxAltitude = Math.ceil(maxAltitude / 1000) * 1000;
 
-    var plotLeft = Math.min(430, Math.max(180, w * 0.30));
+    // The filters now live in the topbar, so the Section chart only needs enough
+    // left clearance for its altitude and signal-axis labels.
+    var plotLeft = Math.min(120, Math.max(90, w * 0.07));
     var detailsOpen = document.getElementById("details-panel").classList.contains("open");
     var plotRight = Math.max(plotLeft + 160, w - (detailsOpen ? 430 : 80));
     var separatePlot = sectionSignalLayout === "separate-plot";
@@ -1526,7 +1535,7 @@
       center: [MapCenter[1], MapCenter[0]],   // MapLibre wants [lon, lat]
       zoom: MapZoom
     });
-    planMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+    planMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
     planMap.addControl(new maplibregl.ScaleControl({ unit: "nautical" }), "bottom-right");
     planMap.on("zoom", rebuildActiveSpindleForZoom);   // re-diameter the shown spindle, if any, as the user zooms
     planMap.on("load", function () {
@@ -1750,8 +1759,8 @@
       pitchWithRotate: true,
       canvasContextAttributes: { antialias: true }
     });
-    threeDMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
-    threeDMap.addControl(new maplibregl.FullscreenControl({ container: threeDViewEl }), "top-right");
+    threeDMap.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "bottom-right");
+    threeDMap.addControl(new maplibregl.FullscreenControl({ container: threeDViewEl }), "bottom-right");
     threeDMap.on("zoom", rebuildActiveSpindleForZoom);   // re-diameter the shown spindle, if any, as the user zooms
     threeDMap.on("load", function () {
       if (!threeDMap.getSource("terrain-dem")) {
@@ -1920,10 +1929,13 @@
   function renderTrainDetails(p) {
     var color = TrainColors[p.route] || NA;
     var statusEl = document.getElementById("details-status");
+    statusEl.hidden = false;
     statusEl.textContent = "Live train";
     statusEl.style.color = color;
     document.getElementById("details-callsign").textContent = p.route + " Train";
-    document.getElementById("details-route").textContent = "Next stop: " + p.nextStop;
+    var detailsRoute = document.getElementById("details-route");
+    detailsRoute.hidden = false;
+    detailsRoute.textContent = "Next stop: " + p.nextStop;
     var rows = [
       ["Route", p.route + " Train"],
       ["Trip ID", p.tripId],
