@@ -1290,7 +1290,14 @@
     updateFlightLayers();
   });
   document.addEventListener("platform:subway-route-focused", function (event) {
-    state.activeSubwayRouteId = (event.detail && event.detail.route) || null;
+    var routeId = (event.detail && event.detail.route) || null;
+    state.activeSubwayRouteId = routeId;
+    // Focusing a subway line takes Section View over from any selected plane, so drop that
+    // selection outright -- closing its details panel and clearing its pill highlight, the
+    // same way selecting a plane releases a focused line. No loop: closeDetails calls
+    // setActiveSectionFlight(null), and index.html only releases the focused line when a
+    // flight is actually being selected.
+    if (routeId && state.selectedIcao24) closeDetails();
     updateFlightLayers();
   });
   document.addEventListener("platform:subway-stations-updated", function (event) {

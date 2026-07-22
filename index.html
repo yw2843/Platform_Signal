@@ -621,7 +621,12 @@
     Object.keys(subwayRouteButtons).forEach(function (id) {
       subwayRouteButtons[id].classList.toggle("active-flight", id === activeRouteId);
     });
-    if (activeRouteId) setSource("Internet Connection");
+    if (activeRouteId) {
+      setSource("Internet Connection");
+      // The Section View carrier band needs this; load it here rather than as a side effect
+      // of the dot row, which may not be present. It re-draws once resolved.
+      loadSubwaySignalJson();
+    }
     renderStationDotRow();
     draw();
     syncActiveRouteHighlight();
@@ -1420,6 +1425,10 @@
   }
 
   window.setActiveSectionFlight = function (flight) {
+    // A plane and a subway line can't own Section View at once. Selecting a plane drops any
+    // focused subway line first -- clearing its button highlight, dropping the ground line
+    // back to its normal height, and letting the flight charts render again (see draw()).
+    if (flight && activeRouteId) setActiveRoute(null);
     var previousIcao24 = activeSectionFlight && activeSectionFlight.icao24
       ? String(activeSectionFlight.icao24).toLowerCase()
       : null;
@@ -1549,6 +1558,12 @@
     ground.setAttribute("width", svgW);
     ground.setAttribute("height", groundHeight);
     ground.setAttribute("fill", GroundColor);
+    // With a plane selected, Section View belongs to its flight charts alone -- the ground
+    // block and the schematic subway route lines beneath them are dropped (see routeLines
+    // below). A focused subway line is mutually exclusive with a selected plane, so this
+    // never hides the ground under the subway profile.
+    var flightFocused = !activeRouteId && !!activeSectionFlight;
+    ground.style.display = flightFocused ? "none" : "";
 
     // Ground surface line
     groundLine.setAttribute("x1", 0);
@@ -1586,7 +1601,7 @@
           : renderPlainLine(r, y, w);
       });
     }
-    routeLines.innerHTML = out;
+    routeLines.innerHTML = flightFocused ? "" : out;
     // Requirement: focusing a subway line hides every flight diagram in Section View.
     flightProfile.innerHTML = activeRouteId ? "" : renderFlightAltitudeProfile(w, groundTop);
   }
