@@ -85,12 +85,26 @@
   // below AND made the casing/core ribbons z-fight, which rendered as dashes along the line.
   var DEPTH_ALWAYS = { depthCompare: "always", depthWriteEnabled: false };
 
-  var SUBWAY_OUTLINE_COLOR = [242, 242, 242, 235];   // #f2f2f2 -- matches SubwayOutlineColor in index.html
-  var ROUTE_DIM_COLOR = [217, 217, 217, 128];         // light grey at 50% opacity while another route is focused
-  var SUBWAY_LINE_WIDTH = 6;
-  var SUBWAY_LINE_WIDTH_SELECTED = 3;                 // thinner while a train on this route is selected
-  var SUBWAY_OUTLINE_WIDTH = 9;
-  var SUBWAY_OUTLINE_WIDTH_SELECTED = 16;             // thicker while a train on this route is selected
+  // Subway appearance is owned by the "Subway appearance" block in index.html, which runs
+  // before this file loads. Reading those globals keeps one source of truth across Plan View
+  // and 3D View -- notably the casing color, which used to live here as a hand-synced RGBA
+  // copy of index.html's hex string. The fallbacks are the pre-consolidation literals, so
+  // this file still renders sanely if it is ever loaded without index.html's script.
+  function styleGlobal(name, fallback) {
+    return typeof window[name] !== "undefined" ? window[name] : fallback;
+  }
+  var SUBWAY_OUTLINE_COLOR = styleGlobal("SubwayOutlineColorRgba", [242, 242, 242, 235]);
+  var SUBWAY_LINE_WIDTH = styleGlobal("SubwayLineWidth3D", 6);
+  var SUBWAY_LINE_WIDTH_SELECTED = styleGlobal("SubwayLineWidth3DSelected", 3);   // thinner while a train on this route is selected
+  var SUBWAY_OUTLINE_WIDTH = styleGlobal("SubwayOutlineWidth3D", 9);
+  var SUBWAY_OUTLINE_WIDTH_SELECTED = styleGlobal("SubwayOutlineWidth3DSelected", 16); // thicker while a train is selected
+  var SUBWAY_DOT_RADIUS = styleGlobal("SubwayDotRadius3D", 4);
+  var SUBWAY_DOT_RADIUS_MIN = styleGlobal("SubwayDotRadius3DMin", 2);
+  var SUBWAY_DOT_STROKE_WIDTH = styleGlobal("SubwayDotStrokeWidth", 2);
+  // Non-focused routes dim to this while another route/train/flight has focus -- the Plan
+  // View equivalent is RouteDimColor + RouteDimOpacity in index.html (kept as a separate CSS
+  // color + opacity pair there since MapLibre paint properties don't take RGBA arrays).
+  var ROUTE_DIM_COLOR = [217, 217, 217, 128];   // light grey at 50% opacity
   // assets/subway-centered.glb is centered by scripts/center-subway-glb.mjs. Raise its
   // center by half its measured height so its lowest point rests on the train-dot plane.
   var SUBWAY_MODEL_HALF_HEIGHT_M = 3.9249777 / 2;
@@ -126,7 +140,10 @@
     // camera and holds its width from any angle, and the casing stays registered around the
     // colored core so the outline survives. Safe here because every route grade is under 3%;
     // billboarding only misbehaves on near-vertical paths.
-    return makeThreeDStationLayer().concat([
+    // Order IS z-order here: every subway layer uses DEPTH_ALWAYS, so nothing occludes
+    // anything and painting order alone decides. Station dots go LAST so they sit in front
+    // of the lines they belong to.
+    return [
       // Thin light-grey casing underneath every route line; thickens when a train on
       // that route is selected (mirrors setRouteHighlighted() for Plan View in index.html).
       new deck.GeoJsonLayer({
@@ -167,7 +184,7 @@
           getLineWidth: [state.selectedTrainRouteId, state.activeSubwayRouteId]
         }
       })
-    ]);
+    ].concat(makeThreeDStationLayer());
   }
 
   // Station dots for the focused line, broadcast by syncActiveStationDots in index.html.
@@ -180,13 +197,13 @@
         data: state.subwayStations3D,
         pointType: "circle",
         pointRadiusUnits: "pixels",
-        getPointRadius: 4,
-        pointRadiusMinPixels: 2,
+        getPointRadius: SUBWAY_DOT_RADIUS,
+        pointRadiusMinPixels: SUBWAY_DOT_RADIUS_MIN,
         getFillColor: SUBWAY_OUTLINE_COLOR,
         getLineColor: hexToRgba(state.subwayStationsColor || "#f2f2f2", 255),
         stroked: true,
         lineWidthUnits: "pixels",
-        getLineWidth: 2,
+        getLineWidth: SUBWAY_DOT_STROKE_WIDTH,
         pickable: false,
         parameters: DEPTH_ALWAYS,
         updateTriggers: { getLineColor: state.subwayStationsColor }
@@ -451,9 +468,11 @@
       state.planOverlay.setProps({ layers: makeFlightLayers("plan").concat([makeSubwayTrainLayer("plan")]) });
     }
     if (state.threeDOverlay) {
-      // Subway routes and models go last so they also paint on top of flight trails/planes.
+      // Array order is z-order. Subway routes go FIRST so flight trails/planes paint on top of
+      // them -- flight routes were previously being hidden underneath the subway lines. Live
+      // subway train models stay last so they remain visible above everything.
       state.threeDOverlay.setProps({
-        layers: makeFlightLayers("3d").concat(makeThreeDSubwayLayer(), [makeSubwayTrainLayer("3d")])
+        layers: makeThreeDSubwayLayer().concat(makeFlightLayers("3d"), [makeSubwayTrainLayer("3d")])
       });
       // The subway layers above register as native layers and can land above the live
       // train dots' native circle layer -- reassert that trains render on top of them.

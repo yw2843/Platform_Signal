@@ -625,17 +625,61 @@
                                  // (left end is always LeftMargin, shared with station mode)
   var SubwaySlots = [0.28, 0.75];// subway line depth, as a fraction of the ground
 
-  // Plan View subway line outline (casing): every route line gets a thin light-grey
-  // casing layer underneath its colored line. Selecting a train on a route thickens
-  // that route's casing and thins its colored line, so the outline reads as the
-  // emphasized element instead of the fill.
-  var SubwayLineWeight = 4;                                 // route line width, normal
-  var SubwayLineWeightSelected = 2;                          // thinner while a train on this route is selected
-  var SubwayOutlineColor = "#f2f2f2";                        // normal casing color for subway routes
-  var SubwayOutlineWeight = SubwayLineWeight + 3;             // casing width, normal
-  var SubwayOutlineWeightSelected = SubwayLineWeight + 10;    // casing width while a train on this route is selected
-  var RouteDimColor = "#d9d9d9";                              // non-focused routes become light grey
+  // ===================== Subway appearance ==========================
+  // SINGLE SOURCE OF TRUTH for how subway lines and station dots look, in BOTH map views.
+  // These are plain top-level vars, so they are globals; assets/js/integrated-flight-tracker.js
+  // loads after this script and reads them for the 3D View (with literal fallbacks, so it
+  // still renders if ever loaded standalone). Keep them here rather than duplicating values
+  // in that file -- the outline color in particular used to exist twice, as a hex string here
+  // and a hand-synced RGBA array there.
+  //
+  // Every route line gets a thin light-grey casing underneath its colored line. Selecting a
+  // train on a route thickens that route's casing and thins its colored line, so the outline
+  // reads as the emphasized element instead of the fill.
+
+  // One knob for stroke thickness everywhere. Change this alone to rescale every subway line
+  // and casing in both Plan View and 3D View.
+  var SubwayThicknessScale = 1 / 3;
+  function subwayStroke(width) { return width * SubwayThicknessScale; }
+
+  var SubwayOutlineColor = "#f2f2f2";   // casing + dot fill color, all routes, always
+
+  // Plan View (MapLibre line-width, px). Base values before scaling: 4 / 2 / 7 / 14.
+  var SubwayLineWeight = subwayStroke(4);              // route line width, normal
+  var SubwayLineWeightSelected = subwayStroke(2);      // thinner while a train on this route is selected
+  var SubwayOutlineWeight = subwayStroke(4 + 3);       // casing width, normal
+  var SubwayOutlineWeightSelected = subwayStroke(4 + 10); // casing width while a train is selected
+
+  // 3D View (deck.gl lineWidth, px). Deliberately its own set of numbers rather than reusing
+  // the Plan values -- the two renderers size strokes differently, so matching numbers would
+  // not look matched. Base values before scaling: 6 / 3 / 9 / 16.
+  var SubwayLineWidth3D = subwayStroke(6);
+  var SubwayLineWidth3DSelected = subwayStroke(3);
+  var SubwayOutlineWidth3D = subwayStroke(9);
+  var SubwayOutlineWidth3DSelected = subwayStroke(16);
+
+  // Active-route station dots, both views. Radius is in px and does NOT follow
+  // SubwayThicknessScale -- the dots are markers, not strokes.
+  var SubwayDotFillColor = SubwayOutlineColor;   // stroke color is the route's own color
+  var SubwayDotStrokeWidth = 2;
+  var SubwayDotRadiusPlanMinZoom = 2.5;   // Plan View radius at zoom 9 ...
+  var SubwayDotRadiusPlanMaxZoom = 6;     // ... interpolating to this at zoom 14
+  var SubwayDotRadius3D = 4;
+  var SubwayDotRadius3DMin = 2;
+
+  // Hex -> [r, g, b, a] for deck.gl, which needs color arrays rather than CSS strings.
+  function subwayRgba(hex, alpha) {
+    var value = parseInt(String(hex).replace("#", ""), 16);
+    return [(value >> 16) & 255, (value >> 8) & 255, value & 255, alpha];
+  }
+  var SubwayOutlineColorRgba = subwayRgba(SubwayOutlineColor, 235);
+
+  // Non-focused routes dim to this (Plan View only -- the 3D View equivalent is
+  // ROUTE_DIM_COLOR in assets/js/integrated-flight-tracker.js, kept separate since deck.gl
+  // needs an RGBA array rather than a CSS color + opacity pair).
+  var RouteDimColor = "#d9d9d9";
   var RouteDimOpacity = 0.5;
+  // =================================================================
 
   // Station mode (shown while "Internet Connection" is selected)
   var LeftMargin = 140;          // px gap from the left screen edge to the first station
@@ -930,9 +974,13 @@
             type: "circle",
             source: ActiveStationDotsLayerId,
             paint: {
-              "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.5, 14, 6],
-              "circle-color": SubwayOutlineColor,
-              "circle-stroke-width": 2
+              // See the "Subway appearance" block for these constants.
+              "circle-radius": ["interpolate", ["linear"], ["zoom"],
+                9, SubwayDotRadiusPlanMinZoom,
+                14, SubwayDotRadiusPlanMaxZoom
+              ],
+              "circle-color": SubwayDotFillColor,
+              "circle-stroke-width": SubwayDotStrokeWidth
             }
           });
         }
@@ -2534,27 +2582,35 @@
     Object.keys(routeGeoJsonById).forEach(syncRouteLayer);
   }
 
-  // ---- Subway lines must always render above everything else on the Plan
-  // map (flight trails/planes, boundary rings), no matter which order those
-  // other layers happen to load in -- except live train dots, which render
-  // above the subway lines themselves. moveLayer(id) with no beforeId
-  // re-appends a layer at the very top of the style's layer stack, so calling
-  // this after any layer addition keeps that order. (The 3D map handles this
-  // differently -- see syncThreeDRouteLayer above -- because terrain there
-  // makes layer order alone insufficient.) ----
+  // ---- Plan View stacking order, back to front:
+  //   subway casing -> subway line -> subway station dots -> flight paths -> live train dots
+  // Subway used to be raised above everything including the flight overlay, but flight routes
+  // were getting hidden underneath it, so the subway group is now raised only as far as the
+  // first flight-trail layer. deck.gl's interleaved overlay registers its layers in the
+  // MapLibre style under their own deck ids, so they can be used as a moveLayer beforeId.
+  // moveLayer(id) with no beforeId re-appends at the very top, which is still what we want
+  // for live train dots (and for the subway group when no flights are loaded yet).
+  // (The 3D map handles ordering differently -- see makeThreeDSubwayLayer in
+  // integrated-flight-tracker.js -- because there the deck.gl layer array order is z-order.)
+  var PlanFlightTrailLayerIds = ["plan-confirmed-flight-trails", "plan-probable-flight-trails"];
   function subwayRouteIds() {
     return routes.filter(function (r) { return r.type === "subway"; }).map(function (r) { return r.id; });
   }
-  function bringLayerToFront(map, layerId) {
-    if (map && map.getLayer(layerId)) map.moveLayer(layerId);
+  function bringLayerToFront(map, layerId, beforeId) {
+    if (map && map.getLayer(layerId)) map.moveLayer(layerId, beforeId);
   }
   function bringSubwayToFront() {
+    // Raise the subway group to just below the flight trails, so flights stay in front.
+    var beforeId = PlanFlightTrailLayerIds.filter(function (id) {
+      return planMap && planMap.getLayer(id);
+    })[0];
     subwayRouteIds().forEach(function (routeId) {
       // Casing first, then the colored line, so the line ends up on top of its own casing.
-      bringLayerToFront(planMap, "route-" + routeId + "-casing");
-      bringLayerToFront(planMap, "route-" + routeId);
+      bringLayerToFront(planMap, "route-" + routeId + "-casing", beforeId);
+      bringLayerToFront(planMap, "route-" + routeId, beforeId);
     });
-    bringLayerToFront(planMap, "live-trains");   // train dots stay above the subway lines just reordered
+    bringLayerToFront(planMap, ActiveStationDotsLayerId, beforeId);   // dots in front of their lines
+    bringLayerToFront(planMap, "live-trains");   // train dots stay on top of everything
   }
 
   // ---- Coordinate system: all source files are EPSG:2263 (NAD83 / NY Long
