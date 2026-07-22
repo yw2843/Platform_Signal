@@ -1,4 +1,4 @@
-/* global deck */
+/* global deck, maplibregl, THREE */
 
 (function () {
   "use strict";
@@ -30,6 +30,7 @@
     detailsRoute: document.getElementById("details-route"),
     detailsBody: document.getElementById("details-body"),
     detailsNote: document.getElementById("details-note"),
+    signalRouteLegend: document.getElementById("flight-signal-route-legend"),
     loadingCard: document.getElementById("loading-card"),
     mapMessage: document.getElementById("map-message")
   };
@@ -41,10 +42,30 @@
     directionFilter: "all",
     planOverlay: null,
     threeDOverlay: null,
+    planSignalLayer: null,
+    threeDSignalLayer: null,
     subwayRoutes3D: null,
     selectedTrainRouteId: null,
+    selectedSignalHistory: [],
+    selectedSignalProvisional: [],
+    selectedSignalSince: null,
+    selectedSignalWindowEnd: null,
+    selectedSignalReferenceLossDb: null,
+    selectedSignalLoadingIcao24: null,
+    selectedSignalSelectionVersion: 0,
+    selectedSignalFocusedVersions: { plan: null, "3d": null },
+    selectedSignalNoDataMessageVersion: null,
     messageTimer: null
   };
+
+  var SIGNAL_ROUTE_WINDOW_SECONDS = 15 * 60;
+  var SIGNAL_VISUAL_FLOOR_DB = -20;
+  var SIGNAL_RING_MIN_RADIUS_PX = 5;
+  var SIGNAL_RING_MAX_RADIUS_PX = 34;
+  var SIGNAL_RING_MIN_RADIUS_M = 20;
+  var SIGNAL_RING_MAX_RADIUS_M = 350;
+  var SIGNAL_RING_SEGMENTS = 20;
+  var SIGNAL_ROUTE_COLOR = 0xff8424;
 
   var SUBWAY_OUTLINE_COLOR = [242, 242, 242, 235];   // #f2f2f2 -- matches SubwayOutlineColor in index.html
   var SUBWAY_LINE_WIDTH = 6;
@@ -100,6 +121,7 @@
 
   function filteredFlights() {
     return state.flights.filter(function (flight) {
+      if (!flight.active) return false;
       var statusMatches = state.statusFilter === "all" || flight.status === state.statusFilter;
       var directionMatches = state.directionFilter === "all" || flight.direction === state.directionFilter;
       return statusMatches && directionMatches;
@@ -110,6 +132,7 @@
     var property = mode === "plan" ? "planOverlay" : "threeDOverlay";
     if (!map || state[property]) return;
     addBoundaryLayers(map, mode);
+    ensureSelectedSignalLayer(map, mode);
     var overlay = new deck.MapboxOverlay({
       interleaved: true,
       layers: [],
@@ -201,10 +224,25 @@
     }
     function flightPosition(flight) {
       var current = flight.current;
+      if (flight.icao24 === state.selectedIcao24 && flight.signal_v2 && flight.signal_v2.live_current) {
+        var live = flight.signal_v2.live_current;
+        if (finiteNumber(live.aircraft_lon) != null && finiteNumber(live.aircraft_lat) != null) {
+          return [Number(live.aircraft_lon), Number(live.aircraft_lat),
+            is3D ? Math.max(0, Number(live.aircraft_altitude_m) || 0) : 0];
+        }
+      }
       return [current.longitude, current.latitude, is3D ? Number(current.altitude_m || 0) : 0];
     }
+    function flightHeading(flight) {
+      var current = flight.current;
+      if (flight.icao24 === state.selectedIcao24 && flight.signal_v2 && flight.signal_v2.live_current &&
+          finiteNumber(flight.signal_v2.live_current.heading_deg) != null) {
+        return Number(flight.signal_v2.live_current.heading_deg);
+      }
+      return Number(current.heading_deg || 0);
+    }
 
-    return [
+    var layers = [
       new deck.PathLayer({
         id: prefix + "confirmed-flight-trails",
         data: confirmed,
@@ -242,7 +280,9 @@
         extensions: [new deck.PathStyleExtension({ dash: true })],
         onClick: onPick,
         updateTriggers: { getColor: state.selectedIcao24, getWidth: state.selectedIcao24 }
-      }),
+      })
+    ];
+    layers.push(
       new deck.ScatterplotLayer({
         id: prefix + "flight-status-halos",
         data: activeFlights,
@@ -265,7 +305,7 @@
         data: activeFlights,
         scenegraph: "/assets/plane.glb",
         getPosition: flightPosition,
-        getOrientation: function (flight) { return [0, Number(flight.current.heading_deg || 0), 90]; },
+        getOrientation: function (flight) { return [0, flightHeading(flight), 90]; },
         getScale: [1, 1, 1],
         sizeScale: 1,
         sizeMinPixels: 10,
@@ -276,7 +316,8 @@
         highlightColor: [255, 255, 255, 100],
         onClick: onPick
       })
-    ];
+    );
+    return layers;
   }
 
   function updateFlightLayers() {
@@ -290,6 +331,7 @@
         window.ThreeDView.bringLiveTrainsToFront();
       }
     }
+    updateSelectedSignalGeometry();
   }
 
   function statusColor(flight, alpha) {
@@ -348,6 +390,15 @@
     window.dispatchEvent(new CustomEvent("platform:flight-signal-v2-tick", {
       detail: { generatedAt: nowSeconds, flights: ticks }
     }));
+    if (state.selectedIcao24) {
+      var selectedFlight = state.flights.find(function (flight) {
+        return flight.icao24 === state.selectedIcao24;
+      });
+      if (selectedFlight) {
+        syncSelectedSignalRoute(selectedFlight, false);
+        updateFlightLayers();
+      }
+    }
     if (state.selectedIcao24 && ui.detailsPanel.classList.contains("open")) {
       var selected = state.flights.find(function (flight) {
         return flight.icao24 === state.selectedIcao24;
@@ -358,12 +409,13 @@
 
   function renderStatus(payload) {
     var service = payload.service || {};
+    var activeFlights = state.flights.filter(function (flight) { return flight.active; });
     var label = service.state === "online" ? "Live" : capitalize(service.state || "starting");
     setConnection(service.state, label);
-    ui.confirmedCount.textContent = state.flights.filter(function (flight) {
+    ui.confirmedCount.textContent = activeFlights.filter(function (flight) {
       return flight.status === "confirmed";
     }).length;
-    ui.probableCount.textContent = state.flights.filter(function (flight) {
+    ui.probableCount.textContent = activeFlights.filter(function (flight) {
       return flight.status === "probable";
     }).length;
     ui.lastUpdate.textContent = payload.source_time ? formatClock(payload.source_time * 1000) : "--";
@@ -387,24 +439,35 @@
     if (!flights.length) {
       var empty = document.createElement("span");
       empty.className = "filter-placeholder";
-      empty.textContent = state.flights.length ? "No flights match these filters" : "Waiting for classified flights...";
+      empty.textContent = state.flights.length ? "No live flights match these filters" : "Waiting for classified flights...";
       ui.flightPicker.appendChild(empty);
       return;
     }
     flights.forEach(function (flight) {
+      var signalAvailability = currentSignalAvailability(flight);
       var button = document.createElement("button");
       button.type = "button";
       button.className = "route-btn pill flight-" + flight.status;
+      if (!signalAvailability.drawable) button.classList.add("flight-signal-unavailable");
       if (flight.icao24 === state.selectedIcao24) button.classList.add("active-flight");
       button.textContent = flight.callsign || flight.icao24.toUpperCase();
       button.title = capitalize(flight.status) + " " + flight.direction + " - " +
-        formatNumber(flight.current.distance_nm, 1, " NM from LGA");
+        formatNumber(flight.current.distance_nm, 1, " NM from LGA") + " - " +
+        signalAvailability.reason;
+      if (!signalAvailability.drawable) {
+        var signalBadge = document.createElement("span");
+        signalBadge.className = "flight-signal-state";
+        signalBadge.textContent = "No current modeled signal";
+        button.appendChild(signalBadge);
+      }
       button.addEventListener("click", function () { selectFlight(flight.icao24); });
       ui.flightPicker.appendChild(button);
     });
   }
 
   function selectFlight(icao24) {
+    var isNewSelection = state.selectedIcao24 !== icao24;
+    if (isNewSelection) resetSelectedSignalRoute();
     state.selectedIcao24 = icao24;
     var flight = state.flights.find(function (item) { return item.icao24 === icao24; });
     if (!flight) return;
@@ -415,12 +478,24 @@
     renderFlightButtons();
     ui.detailsPanel.classList.add("open");
     ui.detailsPanel.setAttribute("aria-hidden", "false");
+    syncSelectedSignalRoute(flight, true);
+    var signalAvailability = currentSignalAvailability(flight);
+    var callsign = flight.callsign || flight.icao24.toUpperCase();
+    if (isNewSelection) {
+      showMessage(signalAvailability.drawable
+        ? callsign + ": loading and framing the selected 15-minute signal route..."
+        : callsign + ": current signal unavailable (" + signalAvailability.reason.toLowerCase() +
+          "); checking the rolling 15-minute route.");
+    } else {
+      focusSelectedSignalRoute(activeViewMode(), true);
+    }
     if (window.setActiveSectionFlight) window.setActiveSectionFlight(flight);
     updateFlightLayers();
   }
 
   function closeDetails() {
     state.selectedIcao24 = null;
+    resetSelectedSignalRoute();
     ui.detailsPanel.classList.remove("open");
     ui.detailsPanel.setAttribute("aria-hidden", "true");
     renderFlightButtons();
@@ -435,7 +510,14 @@
       closeDetails();
       return;
     }
+    if (!flight.active) {
+      var callsign = flight.callsign || flight.icao24.toUpperCase();
+      closeDetails();
+      showMessage(callsign + " is no longer live, so its signal route has been cleared.");
+      return;
+    }
     renderDetails(flight);
+    syncSelectedSignalRoute(flight, true);
     if (window.setActiveSectionFlight) window.setActiveSectionFlight(flight);
   }
 
@@ -495,6 +577,534 @@
     } else {
       ui.detailsNote.textContent = "V2 values are modeled path loss, not measured dBm. Lower total loss is stronger; 0 dB relative change is the strongest modeled point in the selected phase or flight.";
     }
+  }
+
+  function finiteNumber(value) {
+    if (value == null || value === "") return null;
+    var number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function mergeSignalPoints(existing, incoming) {
+    var byTimestamp = {};
+    existing.concat(incoming || []).forEach(function (point) {
+      var timestamp = finiteNumber(point && point.timestamp);
+      if (timestamp != null) byTimestamp[String(timestamp)] = point;
+    });
+    return Object.keys(byTimestamp).map(function (key) {
+      return byTimestamp[key];
+    }).sort(function (a, b) {
+      return Number(a.timestamp) - Number(b.timestamp);
+    });
+  }
+
+  function trimSelectedSignalRoute(windowEndSeconds) {
+    var cutoff = windowEndSeconds - SIGNAL_ROUTE_WINDOW_SECONDS;
+    state.selectedSignalHistory = state.selectedSignalHistory.filter(function (point) {
+      return Number(point.timestamp) >= cutoff;
+    });
+    state.selectedSignalProvisional = state.selectedSignalProvisional.filter(function (point) {
+      return Number(point.timestamp) >= cutoff;
+    });
+  }
+
+  function resetSelectedSignalRoute() {
+    state.selectedSignalHistory = [];
+    state.selectedSignalProvisional = [];
+    state.selectedSignalSince = null;
+    state.selectedSignalWindowEnd = null;
+    state.selectedSignalReferenceLossDb = null;
+    state.selectedSignalLoadingIcao24 = null;
+    state.selectedSignalSelectionVersion += 1;
+    state.selectedSignalNoDataMessageVersion = null;
+    setSignalLegendVisible(false);
+  }
+
+  function setSignalLegendVisible(visible) {
+    if (!ui.signalRouteLegend) return;
+    ui.signalRouteLegend.classList.toggle("visible", Boolean(visible));
+    ui.signalRouteLegend.setAttribute("aria-hidden", String(!visible));
+  }
+
+  function updateSignalReference(points) {
+    var references = (points || []).map(function (point) {
+      var loss = finiteNumber(point && point.total_loss_db);
+      var relative = finiteNumber(point && point.relative_signal_flight_db);
+      return loss == null || relative == null ? null : loss + relative;
+    }).filter(function (value) { return value != null; });
+    if (references.length) state.selectedSignalReferenceLossDb = Math.min.apply(null, references);
+  }
+
+  function syncSelectedSignalRoute(flight, loadHistory) {
+    if (!flight || flight.icao24 !== state.selectedIcao24 || !flight.signal_v2) return;
+    var signal = flight.signal_v2;
+    var provisional = [];
+    if (signal.current) provisional.push(signal.current);
+    provisional = provisional.concat(signal.predicted_timeline || []);
+    var finalizedThrough = finiteNumber(signal.finalized_through);
+    if (finalizedThrough != null) {
+      state.selectedSignalWindowEnd = Math.max(
+        state.selectedSignalWindowEnd == null ? finalizedThrough : state.selectedSignalWindowEnd,
+        finalizedThrough
+      );
+      provisional = provisional.filter(function (point) {
+        return Number(point.timestamp) > finalizedThrough;
+      });
+    }
+    state.selectedSignalProvisional = mergeSignalPoints([], provisional);
+    updateSignalReference([signal.current].concat(signal.predicted_timeline || []));
+    trimSelectedSignalRoute(state.selectedSignalWindowEnd || Date.now() / 1000);
+    setSignalLegendVisible(drawableSelectedSignalPoints().length >= 2);
+    if (loadHistory) loadSelectedSignalHistory();
+  }
+
+  function loadSelectedSignalHistory() {
+    if (!state.selectedIcao24) return;
+    var icao24 = String(state.selectedIcao24).toLowerCase();
+    if (state.selectedSignalLoadingIcao24 === icao24) return;
+    var selectionVersion = state.selectedSignalSelectionVersion;
+    var since = state.selectedSignalSince;
+    if (since == null) {
+      since = (state.selectedSignalWindowEnd || Date.now() / 1000) - SIGNAL_ROUTE_WINDOW_SECONDS - 2;
+    }
+    var url = "/api/signal-v2?icao24=" + encodeURIComponent(icao24) +
+      "&since=" + encodeURIComponent(since);
+    state.selectedSignalLoadingIcao24 = icao24;
+    fetch(url, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) throw new Error("Signal history returned HTTP " + response.status);
+        return response.json();
+      })
+      .then(function (payload) {
+        if (String(state.selectedIcao24 || "").toLowerCase() !== icao24 ||
+            selectionVersion !== state.selectedSignalSelectionVersion) return;
+        var incoming = payload.points || [];
+        state.selectedSignalHistory = mergeSignalPoints(state.selectedSignalHistory, incoming);
+        updateSignalReference(incoming);
+        var finalizedThrough = finiteNumber(payload.finalized_through);
+        if (finalizedThrough != null) {
+          state.selectedSignalSince = finalizedThrough;
+          state.selectedSignalWindowEnd = Math.max(
+            state.selectedSignalWindowEnd == null ? finalizedThrough : state.selectedSignalWindowEnd,
+            finalizedThrough
+          );
+          state.selectedSignalProvisional = state.selectedSignalProvisional.filter(function (point) {
+            return Number(point.timestamp) > finalizedThrough;
+          });
+        }
+        trimSelectedSignalRoute(state.selectedSignalWindowEnd || Date.now() / 1000);
+        updateFlightLayers();
+        resolveSelectedSignalFocus(selectionVersion);
+      })
+      .catch(function (error) {
+        if (window.console && console.warn) console.warn("Selected signal route unavailable:", error);
+        if (selectionVersion === state.selectedSignalSelectionVersion) {
+          if (!focusSelectedSignalRoute(activeViewMode())) {
+            showMessage("The selected signal-route history could not be loaded. Try selecting the flight again.");
+          }
+        }
+      })
+      .then(function () {
+        if (selectionVersion === state.selectedSignalSelectionVersion &&
+            state.selectedSignalLoadingIcao24 === icao24) {
+          state.selectedSignalLoadingIcao24 = null;
+        }
+      });
+  }
+
+  function selectedSignalPoints() {
+    var cutoff = (state.selectedSignalWindowEnd || Date.now() / 1000) - SIGNAL_ROUTE_WINDOW_SECONDS;
+    return mergeSignalPoints(state.selectedSignalHistory, state.selectedSignalProvisional).filter(function (point) {
+      return Number(point.timestamp) >= cutoff &&
+        finiteNumber(point.aircraft_lon) != null && finiteNumber(point.aircraft_lat) != null;
+    });
+  }
+
+  function drawableSignalPoint(point) {
+    return finiteNumber(point && point.total_loss_db) != null &&
+      finiteNumber(point && point.aircraft_lon) != null &&
+      finiteNumber(point && point.aircraft_lat) != null &&
+      finiteNumber(point && point.aircraft_altitude_m) != null;
+  }
+
+  function drawableSelectedSignalPoints() {
+    return selectedSignalPoints().filter(drawableSignalPoint);
+  }
+
+  function currentSignalAvailability(flight) {
+    var signalV2 = flight && flight.signal_v2;
+    var current = signalV2 ? (signalV2.live_current || signalV2.current) : null;
+    var candidates = current ? [current] : [];
+    if (signalV2 && signalV2.predicted_timeline) {
+      candidates = candidates.concat(signalV2.predicted_timeline);
+    }
+    if (candidates.some(drawableSignalPoint)) {
+      return { drawable: true, reason: "Modeled signal available" };
+    }
+    if (!current) return { drawable: false, reason: "Waiting for modeled signal" };
+    if (current.frequency_assignment_status === "outside_40_nm") {
+      return { drawable: false, reason: "Outside 40 NM" };
+    }
+    if (current.frequency_assignment_status === "unavailable") {
+      return { drawable: false, reason: "No phase/frequency assignment" };
+    }
+    return { drawable: false, reason: "Modeled loss unavailable" };
+  }
+
+  function activeViewMode() {
+    return document.body.getAttribute("data-view-mode") || "plan";
+  }
+
+  function signalRouteBounds(points) {
+    var bounds = {
+      west: Infinity,
+      south: Infinity,
+      east: -Infinity,
+      north: -Infinity
+    };
+    points.forEach(function (point) {
+      var longitude = Number(point.aircraft_lon);
+      var latitude = Number(point.aircraft_lat);
+      bounds.west = Math.min(bounds.west, longitude);
+      bounds.south = Math.min(bounds.south, latitude);
+      bounds.east = Math.max(bounds.east, longitude);
+      bounds.north = Math.max(bounds.north, latitude);
+    });
+    return [[bounds.west, bounds.south], [bounds.east, bounds.north]];
+  }
+
+  function signalRouteBearing(points) {
+    if (points.length < 2) return -20;
+    var end = points[points.length - 1];
+    var endLongitude = Number(end.aircraft_lon);
+    var endLatitude = Number(end.aircraft_lat);
+    var start = null;
+    for (var index = points.length - 2; index >= 0; index -= 1) {
+      if (Number(points[index].aircraft_lon) !== endLongitude ||
+          Number(points[index].aircraft_lat) !== endLatitude) {
+        start = points[index];
+        break;
+      }
+    }
+    if (!start) return finiteNumber(end.heading_deg) == null ? -20 : Number(end.heading_deg);
+    var lat1 = Number(start.aircraft_lat) * Math.PI / 180;
+    var lat2 = endLatitude * Math.PI / 180;
+    var longitudeDelta = (endLongitude - Number(start.aircraft_lon)) * Math.PI / 180;
+    var y = Math.sin(longitudeDelta) * Math.cos(lat2);
+    var x = Math.cos(lat1) * Math.sin(lat2) -
+      Math.sin(lat1) * Math.cos(lat2) * Math.cos(longitudeDelta);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  function signalRoutePadding(map) {
+    var width = map.getContainer().clientWidth || window.innerWidth;
+    if (width >= 1100) return { top: 140, right: 410, bottom: 100, left: 370 };
+    return { top: 100, right: 45, bottom: 90, left: 45 };
+  }
+
+  function focusSelectedSignalRoute(mode, force) {
+    if (mode !== "plan" && mode !== "3d") return false;
+    if (!state.selectedIcao24) return false;
+    if (!force && state.selectedSignalFocusedVersions[mode] === state.selectedSignalSelectionVersion) {
+      return true;
+    }
+    var points = drawableSelectedSignalPoints();
+    if (points.length < 2) return false;
+    var view = mode === "3d" ? window.ThreeDView : window.PlanView;
+    var map = view && view.getMap();
+    if (!map || !map.isStyleLoaded() || map.getContainer().clientWidth === 0) return false;
+    var options = {
+      padding: signalRoutePadding(map),
+      maxZoom: mode === "3d" ? 15 : 15.5,
+      duration: 1100
+    };
+    if (mode === "3d") {
+      options.pitch = 65;
+      options.bearing = signalRouteBearing(points);
+    }
+    map.fitBounds(signalRouteBounds(points), options);
+    state.selectedSignalFocusedVersions[mode] = state.selectedSignalSelectionVersion;
+    return true;
+  }
+
+  function resolveSelectedSignalFocus(selectionVersion) {
+    if (selectionVersion !== state.selectedSignalSelectionVersion) return;
+    var points = drawableSelectedSignalPoints();
+    setSignalLegendVisible(points.length >= 2);
+    if (points.length >= 2) {
+      focusSelectedSignalRoute(activeViewMode());
+      return;
+    }
+    if (state.selectedSignalNoDataMessageVersion === selectionVersion) return;
+    state.selectedSignalNoDataMessageVersion = selectionVersion;
+    var flight = state.flights.find(function (item) { return item.icao24 === state.selectedIcao24; });
+    var callsign = flight ? (flight.callsign || flight.icao24.toUpperCase()) : "Selected flight";
+    var availability = currentSignalAvailability(flight);
+    showMessage(callsign + ": no modeled signal is available in the rolling 15-minute window (" +
+      availability.reason.toLowerCase() + ").");
+  }
+
+  function signalStrength(point, visibleMinimumLoss) {
+    var loss = finiteNumber(point && point.total_loss_db);
+    if (loss == null) return null;
+    var reference = state.selectedSignalReferenceLossDb;
+    if (reference == null) reference = visibleMinimumLoss;
+    if (reference == null) return null;
+    var relativeDb = Math.max(SIGNAL_VISUAL_FLOOR_DB, Math.min(0, reference - loss));
+    return (relativeDb - SIGNAL_VISUAL_FLOOR_DB) / -SIGNAL_VISUAL_FLOOR_DB;
+  }
+
+  function disposeSignalObject(object3d) {
+    if (!object3d) return;
+    var materials = [];
+    object3d.traverse(function (node) {
+      if (node.geometry && typeof node.geometry.dispose === "function") node.geometry.dispose();
+      if (node.material) {
+        (Array.isArray(node.material) ? node.material : [node.material]).forEach(function (material) {
+          if (materials.indexOf(material) === -1) materials.push(material);
+        });
+      }
+    });
+    materials.forEach(function (material) { material.dispose(); });
+  }
+
+  function createSelectedSignalLayer(mode) {
+    return {
+      id: (mode === "3d" ? "three-d-" : "plan-") + "selected-flight-signal-rings",
+      type: "custom",
+      renderingMode: "3d",
+      object3d: null,
+      originMercator: null,
+      meterScale: 1,
+      metrics: { rings: 0, finalizedRings: 0, predictedRings: 0 },
+      onAdd: function (map, gl) {
+        this.map = map;
+        this.camera = new THREE.Camera();
+        this.scene = new THREE.Scene();
+        this.renderer = new THREE.WebGLRenderer({ canvas: map.getCanvas(), context: gl, antialias: true });
+        this.renderer.autoClear = false;
+        if (this.object3d) this.scene.add(this.object3d);
+      },
+      setSignalObject: function (payload) {
+        if (this.object3d && this.scene) this.scene.remove(this.object3d);
+        disposeSignalObject(this.object3d);
+        this.object3d = payload ? payload.object3d : null;
+        this.metrics = payload ? payload.metrics : { rings: 0, finalizedRings: 0, predictedRings: 0 };
+        if (payload) {
+          this.originMercator = maplibregl.MercatorCoordinate.fromLngLat(payload.originLonLat, 0);
+          this.meterScale = this.originMercator.meterInMercatorCoordinateUnits();
+        } else {
+          this.originMercator = null;
+        }
+        if (this.object3d && this.scene) this.scene.add(this.object3d);
+        if (this.map) this.map.triggerRepaint();
+      },
+      render: function (gl, matrix) {
+        if (!this.object3d || !this.originMercator) return;
+        var projection = new THREE.Matrix4().fromArray(matrix);
+        var localTransform = new THREE.Matrix4()
+          .makeTranslation(this.originMercator.x, this.originMercator.y, this.originMercator.z)
+          .scale(new THREE.Vector3(this.meterScale, this.meterScale, this.meterScale));
+        this.camera.projectionMatrix = projection.multiply(localTransform);
+        this.renderer.resetState();
+        this.renderer.render(this.scene, this.camera);
+      }
+    };
+  }
+
+  function ensureSelectedSignalLayer(map, mode) {
+    var property = mode === "3d" ? "threeDSignalLayer" : "planSignalLayer";
+    if (!map || state[property]) return;
+    var layer = createSelectedSignalLayer(mode);
+    state[property] = layer;
+    map.addLayer(layer);
+    map.on("zoomend", function () { updateSelectedSignalGeometry(mode); });
+  }
+
+  function signalMetersPerPixel(map, latitude) {
+    return 156543.03392 * Math.cos(latitude * Math.PI / 180) / Math.pow(2, map.getZoom());
+  }
+
+  function addLineSegment(target, start, end) {
+    target.push(start.x, start.y, start.z, end.x, end.y, end.z);
+  }
+
+  function makeSignalLineObject(positions, opacity) {
+    if (!positions.length) return null;
+    var geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    var material = new THREE.LineBasicMaterial({
+      color: SIGNAL_ROUTE_COLOR,
+      transparent: true,
+      opacity: opacity,
+      blending: THREE.AdditiveBlending,
+      depthTest: true,
+      depthWrite: false,
+      toneMapped: false
+    });
+    var lines = new THREE.LineSegments(geometry, material);
+    lines.frustumCulled = false;
+    return lines;
+  }
+
+  function routeTangent(centers, index, previousTangent) {
+    var tangent;
+    if (index === 0) tangent = centers[1].clone().sub(centers[0]);
+    else if (index === centers.length - 1) tangent = centers[index].clone().sub(centers[index - 1]);
+    else tangent = centers[index + 1].clone().sub(centers[index - 1]);
+    if (tangent.lengthSq() < 1e-8) {
+      return previousTangent ? previousTangent.clone() : new THREE.Vector3(1, 0, 0);
+    }
+    return tangent.normalize();
+  }
+
+  function initialRingRight(tangent) {
+    var reference = Math.abs(tangent.z) < 0.92
+      ? new THREE.Vector3(0, 0, 1)
+      : new THREE.Vector3(0, 1, 0);
+    var right = new THREE.Vector3().crossVectors(tangent, reference);
+    if (right.lengthSq() < 1e-8) right.set(1, 0, 0);
+    return right.normalize();
+  }
+
+  function buildSignalRunGeometry(run, radiusMinM, radiusMaxM, finalizedPositions, predictedPositions) {
+    var centers = run.map(function (sample) { return sample.center; });
+    var previousTangent = null;
+    var previousRight = null;
+    var previousRing = null;
+    var previousPredicted = false;
+    var finalizedRings = 0;
+    var predictedRings = 0;
+
+    run.forEach(function (sample, index) {
+      var tangent = routeTangent(centers, index, previousTangent);
+      var right;
+      if (!previousRight || !previousTangent) {
+        right = initialRingRight(tangent);
+      } else {
+        var transport = new THREE.Quaternion().setFromUnitVectors(previousTangent, tangent);
+        right = previousRight.clone().applyQuaternion(transport);
+        right.addScaledVector(tangent, -right.dot(tangent));
+        if (right.lengthSq() < 1e-8) right = initialRingRight(tangent);
+        else right.normalize();
+      }
+      var ringUp = new THREE.Vector3().crossVectors(tangent, right).normalize();
+      var radius = radiusMinM + (radiusMaxM - radiusMinM) * sample.strength;
+      var ring = [];
+      for (var angleIndex = 0; angleIndex < SIGNAL_RING_SEGMENTS; angleIndex += 1) {
+        var angle = angleIndex / SIGNAL_RING_SEGMENTS * Math.PI * 2;
+        ring.push(sample.center.clone()
+          .addScaledVector(right, Math.cos(angle) * radius)
+          .addScaledVector(ringUp, Math.sin(angle) * radius));
+      }
+
+      var ringTarget = sample.predicted ? predictedPositions : finalizedPositions;
+      for (var ringIndex = 0; ringIndex < SIGNAL_RING_SEGMENTS; ringIndex += 1) {
+        addLineSegment(ringTarget, ring[ringIndex], ring[(ringIndex + 1) % SIGNAL_RING_SEGMENTS]);
+      }
+      if (sample.predicted) predictedRings += 1;
+      else finalizedRings += 1;
+
+      if (previousRing) {
+        var strandTarget = sample.predicted || previousPredicted ? predictedPositions : finalizedPositions;
+        for (var strandIndex = 0; strandIndex < SIGNAL_RING_SEGMENTS; strandIndex += 1) {
+          addLineSegment(strandTarget, previousRing[strandIndex], ring[strandIndex]);
+        }
+      }
+      previousRing = ring;
+      previousPredicted = sample.predicted;
+      previousTangent = tangent;
+      previousRight = right;
+    });
+    return { finalizedRings: finalizedRings, predictedRings: predictedRings };
+  }
+
+  function makeSelectedSignalObject(map) {
+    if (!state.selectedIcao24) return null;
+    var points = selectedSignalPoints();
+    if (points.length < 2) return null;
+    var losses = points.map(function (point) { return finiteNumber(point.total_loss_db); })
+      .filter(function (value) { return value != null; });
+    var visibleMinimumLoss = losses.length ? Math.min.apply(null, losses) : null;
+    var originPoint = points[Math.floor(points.length / 2)];
+    var originLat = Number(originPoint.aircraft_lat);
+    var originLon = Number(originPoint.aircraft_lon);
+    var metersPerDegreeLat = 111320;
+    var metersPerDegreeLon = metersPerDegreeLat * Math.cos(originLat * Math.PI / 180);
+    var metersPerPixel = signalMetersPerPixel(map, originLat);
+    var radiusMinM = Math.max(SIGNAL_RING_MIN_RADIUS_M,
+      Math.min(80, SIGNAL_RING_MIN_RADIUS_PX * metersPerPixel));
+    var radiusMaxM = Math.max(radiusMinM + 1,
+      Math.min(SIGNAL_RING_MAX_RADIUS_M, SIGNAL_RING_MAX_RADIUS_PX * metersPerPixel));
+    var runs = [];
+    var currentRun = [];
+    var previousTimestamp = null;
+
+    points.forEach(function (point) {
+      var strength = signalStrength(point, visibleMinimumLoss);
+      var timestamp = Number(point.timestamp);
+      var altitude = finiteNumber(point.aircraft_altitude_m);
+      if (strength == null || altitude == null ||
+          (previousTimestamp != null && timestamp - previousTimestamp > 5)) {
+        if (currentRun.length >= 2) runs.push(currentRun);
+        currentRun = [];
+      }
+      if (strength != null && altitude != null) {
+        currentRun.push({
+          timestamp: timestamp,
+          strength: strength,
+          predicted: point.position_status === "predicted",
+          center: new THREE.Vector3(
+            (Number(point.aircraft_lon) - originLon) * metersPerDegreeLon,
+            -(Number(point.aircraft_lat) - originLat) * metersPerDegreeLat,
+            Math.max(0, altitude)
+          )
+        });
+      }
+      previousTimestamp = timestamp;
+    });
+    if (currentRun.length >= 2) runs.push(currentRun);
+    if (!runs.length) return null;
+
+    var finalizedPositions = [];
+    var predictedPositions = [];
+    var finalizedRings = 0;
+    var predictedRings = 0;
+    runs.forEach(function (run) {
+      var counts = buildSignalRunGeometry(
+        run, radiusMinM, radiusMaxM, finalizedPositions, predictedPositions
+      );
+      finalizedRings += counts.finalizedRings;
+      predictedRings += counts.predictedRings;
+    });
+
+    var group = new THREE.Group();
+    var finalizedObject = makeSignalLineObject(finalizedPositions, 0.9);
+    var predictedObject = makeSignalLineObject(predictedPositions, 0.38);
+    if (finalizedObject) group.add(finalizedObject);
+    if (predictedObject) group.add(predictedObject);
+    return {
+      originLonLat: [originLon, originLat],
+      object3d: group,
+      metrics: {
+        rings: finalizedRings + predictedRings,
+        finalizedRings: finalizedRings,
+        predictedRings: predictedRings,
+        radiusMinM: radiusMinM,
+        radiusMaxM: radiusMaxM
+      }
+    };
+  }
+
+  function updateSelectedSignalGeometry(mode) {
+    [
+      { mode: "plan", map: window.PlanView && window.PlanView.getMap(), layer: state.planSignalLayer },
+      { mode: "3d", map: window.ThreeDView && window.ThreeDView.getMap(), layer: state.threeDSignalLayer }
+    ].forEach(function (target) {
+      if (mode && target.mode !== mode) return;
+      if (!target.map || !target.layer) return;
+      target.layer.setSignalObject(makeSelectedSignalObject(target.map));
+    });
   }
 
   function detailRow(key, value) {
@@ -585,9 +1195,19 @@
 
   document.addEventListener("platform:plan-map-ready", function () {
     attachOverlay(window.PlanView && window.PlanView.getMap(), "plan");
+    window.setTimeout(function () { focusSelectedSignalRoute("plan"); }, 0);
   });
   document.addEventListener("platform:three-d-map-ready", function () {
     attachOverlay(window.ThreeDView && window.ThreeDView.getMap(), "3d");
+    window.setTimeout(function () { focusSelectedSignalRoute("3d"); }, 0);
+  });
+  document.addEventListener("platform:view-changed", function (event) {
+    var mode = event.detail && event.detail.mode;
+    if (mode !== "plan" && mode !== "3d") return;
+    window.setTimeout(function () {
+      updateSelectedSignalGeometry(mode);
+      focusSelectedSignalRoute(mode);
+    }, 0);
   });
   document.addEventListener("platform:three-d-subway-routes-updated", function (event) {
     state.subwayRoutes3D = (event.detail && event.detail.featureCollection) || null;

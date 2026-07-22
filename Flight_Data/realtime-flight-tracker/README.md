@@ -10,14 +10,14 @@ The airport relationship, flight phase, and frequency are inferred by transparen
 - Plan and 3D maps use the original CARTO Light Plan View tiles and colors.
 - OpenFreeMap building-height data and a public raster-DEM terrain source.
 - `../DC8_AFRC_AIR_0824.glb` as the shared visualization model for aircraft.
-- One-hour rolling trails, capped by observation age.
+- One-hour rolling trails are retained in backend memory, but the browser lists and draws only flights seen within the 90-second live timeout.
 - One centralized authenticated OpenSky poll every 30 seconds.
 - Probable flights: amber aircraft/halo and dashed trail.
 - Confirmed flights: green aircraft/halo and solid trail.
 - Flight details appear only after an aircraft or route is clicked.
 - Version 1 fields remain available unchanged; Version 2 adds separate one-second phase/frequency/signal-loss records.
 - Version 2 uses a documented synthetic LGA reference site and calculation-only OpenFreeMap building geometry.
-- Signal values are available to the browser and API, but visual signal graphics remain deferred.
+- Clicking a flight adds 15 minutes of orange 3D signal rings and contour strands in Plan and 3D, followed by its 30-second predicted tail.
 - Data beyond the current 40 NM phase/frequency rules is labeled `Future Research`.
 
 ## Architecture
@@ -45,6 +45,7 @@ Original Platform Signal browser UI
   - L/6 trains, aircraft, routes, terrain, and buildings
   - click-only details table
   - advances cached V2 signal data every second without another HTTP or OpenSky request
+  - moves the selected aircraft and refreshes its perpendicular signal rings from the same one-second V2 timeline
 ```
 
 The browser never receives the OpenSky client secret. Multiple browser windows share the same backend response and do not multiply OpenSky API usage.
@@ -208,7 +209,7 @@ Frequency is never used as evidence that a flight belongs to LGA. Classification
 
 The backend may buffer observations outside 40 NM because they fall inside the larger OpenSky collection box. New aircraft outside 40 NM are not classified as LGA traffic.
 
-If an aircraft later qualifies as probable or confirmed, its earlier buffered route can be displayed. Likewise, a confirmed departure can remain visible after crossing 40 NM until its one-hour trail expires. Outside-scope observations use:
+If an aircraft later qualifies as probable or confirmed, its earlier buffered route can be included while it remains live. A confirmed departure can also remain visible after crossing 40 NM while OpenSky continues returning current observations; it leaves the browser after the 90-second live timeout. The backend may retain its one-hour trail internally. Outside-scope observations use:
 
 ```text
 phase_scope = outside_current_rule
@@ -230,8 +231,13 @@ Plan and 3D use independent MapLibre instances so the original subway and signal
 | Terrain | Hidden | Public raster-DEM terrain |
 | Buildings | Hidden | OpenStreetMap height extrusions at close zoom |
 | Aircraft/trails | Altitude-aware, top-down | Altitude-aware perspective |
+| Selected-flight signal | Top projection of perpendicular 3D rings | Perpendicular 3D rings at modeled altitude |
 
 The supplied DC-8 model is reused as a generic aircraft visualization; it does not assert the actual aircraft type. A status-colored halo remains visible because textured glTF models cannot always be reliably recolored.
+
+The selected-flight signal geometry uses the most recent 15 minutes of finalized one-second V2 points plus the current predicted tail. Every sample is a true 3D ring whose plane is perpendicular to the local flight-path tangent; parallel-transported frames keep the rings from flipping as the route turns or climbs. Matching ring vertices are joined into longitudinal contour strands. Ring radius maps whole-flight relative modeled signal from `-20 dB` (minimum radius) to `0 dB` (maximum radius). Finalized history is opaque and the provisional predicted tail is translucent. Seconds without a calculated `total_loss_db` remain gaps, rather than being styled as weak signal. Ring radius is a visual encoding, not a physical radio footprint. The 15-minute cutoff is anchored to the newest finalized observation, so the route advances when new OpenSky observations arrive instead of shedding one ring on every browser-clock second. After the selected history loads, the active Plan or 3D camera fits the route automatically; switching views fits the same selection there, and the 3D bearing follows the latest route direction. Flight buttons label unavailable current data as `No current modeled signal`, and the interface reports when the full rolling window contains no drawable modeled loss. If a selected flight exceeds the 90-second live timeout, its selection and signal geometry are cleared.
+
+The HTTP server uses an exclusive listening socket. A second launch on the same host and port exits with a clear message instead of creating another tracker with a separate in-memory history.
 
 Free/public sources:
 

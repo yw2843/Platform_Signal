@@ -146,6 +146,9 @@ class SignalEngineTests(unittest.TestCase):
         snapshot = engine.snapshot("abc123", 1030.0)
         self.assertEqual(provider.calls, 2)
         self.assertEqual(snapshot["current"]["building_calculation_status"], "observed_exact")
+        self.assertEqual(snapshot["current"]["heading_deg"], 270.0)
+        self.assertEqual(snapshot["current"]["speed_kt"], 120.0)
+        self.assertEqual(snapshot["current"]["vertical_fpm"], -500.0)
         self.assertTrue(
             all(
                 point["building_calculation_status"] == "held_from_latest_observation"

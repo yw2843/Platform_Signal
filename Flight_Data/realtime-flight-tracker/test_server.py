@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from server import PLANE_MODEL, PROJECT_ROOT, TrackerRequestHandler
+from server import ExclusiveThreadingHTTPServer, PLANE_MODEL, PROJECT_ROOT, TrackerRequestHandler
 
 
 class PublicFileAllowlistTests(unittest.TestCase):
@@ -29,6 +29,18 @@ class PublicFileAllowlistTests(unittest.TestCase):
         for path in blocked:
             with self.subTest(path=path):
                 self.assertIsNone(TrackerRequestHandler._public_file(path))
+
+
+class ExclusiveServerTests(unittest.TestCase):
+    def test_second_server_cannot_bind_same_port(self) -> None:
+        first = ExclusiveThreadingHTTPServer(("127.0.0.1", 0), TrackerRequestHandler)
+        try:
+            port = first.server_address[1]
+            with self.assertRaises(OSError):
+                duplicate = ExclusiveThreadingHTTPServer(("127.0.0.1", port), TrackerRequestHandler)
+                duplicate.server_close()
+        finally:
+            first.server_close()
 
 
 if __name__ == "__main__":

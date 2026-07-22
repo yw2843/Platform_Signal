@@ -7,6 +7,7 @@
   --probable: #f5a623;
   --confirmed: #2ed47a;
   --interface-accent: #6dc8ff;
+  --signal-route: #ff8424;
   --interface-danger: #ff6b6b;
 }
 
@@ -157,6 +158,20 @@ button { font: inherit; }
   outline: 2px solid var(--interface-text);
   outline-offset: 2px;
 }
+#controls .route-btn.flight-signal-unavailable {
+  border-style: dashed;
+  opacity: 0.72;
+}
+#controls .route-btn.flight-signal-unavailable.active-flight { opacity: 1; }
+.flight-signal-state {
+  display: inline-block;
+  margin-left: 6px;
+  color: #ffb176;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
 .flight-picker {
   max-height: 122px;
   padding: 3px;
@@ -270,6 +285,18 @@ button { font: inherit; }
 }
 .subway-l-symbol { background: #737373; }
 .subway-6-symbol { background: #396133; }
+.map-legend > .signal-route-legend-item { display: none; flex-basis: 100%; }
+.map-legend > .signal-route-legend-item.visible { display: flex; }
+.signal-route-symbol {
+  width: 26px;
+  height: 17px;
+  flex: 0 0 auto;
+  border: 2px solid var(--signal-route);
+  border-radius: 50%;
+  transform: rotateY(38deg);
+  filter: drop-shadow(0 0 3px rgba(255, 132, 36, 0.72));
+}
+body[data-view-mode="section"] .map-legend > .signal-route-legend-item { display: none; }
 
 .details-panel {
   top: 106px;

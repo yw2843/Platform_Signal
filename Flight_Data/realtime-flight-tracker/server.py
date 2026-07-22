@@ -147,6 +147,18 @@ class TrackerRequestHandler(BaseHTTPRequestHandler):
         super().log_message(format, *args)
 
 
+class ExclusiveThreadingHTTPServer(ThreadingHTTPServer):
+    """Refuse a second tracker process on the same host and port."""
+
+    allow_reuse_address = False
+    allow_reuse_port = False
+
+    def server_bind(self) -> None:
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Platform Signal integrated local server")
     parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
@@ -177,6 +189,18 @@ def main() -> int:
     )
     poller: PollingService | None = None
 
+    TrackerRequestHandler.tracker = tracker
+    try:
+        server = ExclusiveThreadingHTTPServer((args.host, args.port), TrackerRequestHandler)
+    except OSError as exc:
+        tracker.close()
+        print(
+            f"Cannot start Platform Signal on {args.host}:{args.port}: {exc}\n"
+            "Another website instance may still be running. Stop that window with Ctrl+C, then try again."
+        )
+        return 1
+    server.daemon_threads = True
+
     if args.no_poll:
         tracker.update_service_status(state="offline", message="OpenSky polling disabled by --no-poll")
     else:
@@ -188,9 +212,6 @@ def main() -> int:
             poller = PollingService(tracker, client)
             poller.start()
 
-    TrackerRequestHandler.tracker = tracker
-    server = ThreadingHTTPServer((args.host, args.port), TrackerRequestHandler)
-    server.daemon_threads = True
     print(f"Platform Signal local URL: http://127.0.0.1:{args.port}")
     if args.host in {"0.0.0.0", "::"}:
         addresses = local_ipv4_addresses()
