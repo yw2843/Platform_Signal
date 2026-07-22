@@ -271,6 +271,10 @@
     });
     var is3D = mode === "3d";
     var prefix = is3D ? "three-d-" : "plan-";
+    // The GLB has a 0.01 root transform, so a unit scale makes its silhouette
+    // only a few pixels wide at the map's normal zoom levels. Keep the model
+    // comfortably visible, with extra size in the foreshortened 3D view.
+    var aircraftModelScale = is3D ? 8 : 6;
     var onPick = function (info) {
       if (info && info.object) selectFlight(info.object.icao24);
     };
@@ -364,7 +368,7 @@
         scenegraph: "/assets/plane.glb",
         getPosition: flightPosition,
         getOrientation: function (flight) { return [0, flightHeading(flight), 90]; },
-        getScale: [1, 1, 1],
+        getScale: [aircraftModelScale, aircraftModelScale, aircraftModelScale],
         sizeScale: 1,
         sizeMinPixels: 10,
         sizeMaxPixels: is3D ? 58 : 32,
