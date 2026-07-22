@@ -2111,7 +2111,7 @@
   // buildings no matter its position in the style's layer stack. To keep it
   // visible through buildings, the 3D route is NOT a MapLibre layer at all;
   // instead its reprojected GeoJSON is broadcast for integrated-flight-tracker.js
-  // to render as a deck.gl layer with `parameters: { depthTest: false }`,
+  // to render as a deck.gl layer with depth testing off (DEPTH_ALWAYS there),
   // which paints regardless of what's already in the depth buffer.
   function syncThreeDRouteLayer(routeId) {
     if (!routeGeoJsonById[routeId]) return;

@@ -77,6 +77,13 @@
   };
   var SIGNAL_FREQUENCY_UNKNOWN_COLOR = "#7d8790";
 
+  // Draw regardless of what is already in the depth buffer, and never write depth.
+  // NOTE: these are luma.gl v9 (WebGPU-style) parameter names. deck.gl v9 replaced the old
+  // WebGL spelling -- `{depthTest: false}`, which these layers used to pass -- and silently
+  // ignores it, so depth testing stayed ON. That defeated the draw-through-buildings intent
+  // below AND made the casing/core ribbons z-fight, which rendered as dashes along the line.
+  var DEPTH_ALWAYS = { depthCompare: "always", depthWriteEnabled: false };
+
   var SUBWAY_OUTLINE_COLOR = [242, 242, 242, 235];   // #f2f2f2 -- matches SubwayOutlineColor in index.html
   var SUBWAY_LINE_WIDTH = 6;
   var SUBWAY_LINE_WIDTH_SELECTED = 3;                 // thinner while a train on this route is selected
@@ -90,7 +97,7 @@
 
   // The 3D map has terrain enabled, so an ordinary MapLibre line layer for the
   // subway route gets depth-tested against extruded buildings and disappears
-  // behind them. Rendering it as a deck.gl layer with depthTest off paints it
+  // behind them. Rendering it as a deck.gl layer with depth testing off (DEPTH_ALWAYS) paints it
   // regardless of what's already in the depth buffer, keeping it visible
   // through buildings. Data comes from index.html's broadcast (see
   // "platform:three-d-subway-routes-updated" below) rather than a fetch here,
@@ -103,6 +110,13 @@
       var id = feature.properties.routeId;
       return id === state.selectedTrainRouteId || id === state.activeSubwayRouteId;
     }
+    // lineBillboard extrudes each ribbon in SCREEN space rather than in the ground plane
+    // (GeoJsonLayer's name for PathLayer's `billboard`). Without it the pixel width is only
+    // correct viewed straight down, so an oblique 3D camera foreshortens the line until it
+    // reads as a flat decal painted on the terrain. Billboarded, the ribbon always faces the
+    // camera and holds its width from any angle, and the casing stays registered around the
+    // colored core so the outline survives. Safe here because every route grade is under 3%;
+    // billboarding only misbehaves on near-vertical paths.
     return makeThreeDStationLayer().concat([
       // Thin light-grey casing underneath every route line; thickens when a train on
       // that route is selected (mirrors setRouteHighlighted() for Plan View in index.html).
@@ -112,10 +126,15 @@
         getLineColor: SUBWAY_OUTLINE_COLOR,
         getLineWidth: function (feature) { return isSelected(feature) ? SUBWAY_OUTLINE_WIDTH_SELECTED : SUBWAY_OUTLINE_WIDTH; },
         lineWidthUnits: "pixels",
+        lineBillboard: true,
         lineJointRounded: true,
         lineCapRounded: true,
         pickable: false,
-        parameters: { depthTest: false },
+        // depthBias pushes the casing away from the camera so the colored core always wins
+        // the depth comparison. Belt-and-braces alongside DEPTH_ALWAYS: the two ribbons share
+        // one centerline, so without separation they are coplanar and z-fight, which showed
+        // up as the core breaking through the casing in dashes.
+        parameters: Object.assign({ depthBias: 1, depthBiasSlopeScale: 1 }, DEPTH_ALWAYS),
         updateTriggers: { getLineWidth: [state.selectedTrainRouteId, state.activeSubwayRouteId] }
       }),
       new deck.GeoJsonLayer({
@@ -124,17 +143,18 @@
         getLineColor: function (feature) { return hexToRgba(feature.properties.color, 235); },
         getLineWidth: function (feature) { return isSelected(feature) ? SUBWAY_LINE_WIDTH_SELECTED : SUBWAY_LINE_WIDTH; },
         lineWidthUnits: "pixels",
+        lineBillboard: true,
         lineJointRounded: true,
         lineCapRounded: true,
         pickable: false,
-        parameters: { depthTest: false },
+        parameters: DEPTH_ALWAYS,
         updateTriggers: { getLineWidth: [state.selectedTrainRouteId, state.activeSubwayRouteId] }
       })
     ]);
   }
 
   // Station dots for the focused line, broadcast by syncActiveStationDots in index.html.
-  // Same depthTest:false treatment as the route lines so terrain/buildings can't hide them.
+  // Same DEPTH_ALWAYS treatment as the route lines so terrain/buildings can't hide them.
   function makeThreeDStationLayer() {
     if (!state.subwayStations3D || !state.subwayStations3D.features.length) return [];
     return [
@@ -151,7 +171,7 @@
         lineWidthUnits: "pixels",
         getLineWidth: 2,
         pickable: false,
-        parameters: { depthTest: false },
+        parameters: DEPTH_ALWAYS,
         updateTriggers: { getLineColor: state.subwayStationsColor }
       })
     ];
