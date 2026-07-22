@@ -631,9 +631,11 @@
   // emphasized element instead of the fill.
   var SubwayLineWeight = 4;                                 // route line width, normal
   var SubwayLineWeightSelected = 2;                          // thinner while a train on this route is selected
-  var SubwayOutlineColor = "#f2f2f2";                        // casing color, all routes, always
+  var SubwayOutlineColor = "#f2f2f2";                        // normal casing color for subway routes
   var SubwayOutlineWeight = SubwayLineWeight + 3;             // casing width, normal
   var SubwayOutlineWeightSelected = SubwayLineWeight + 10;    // casing width while a train on this route is selected
+  var RouteDimColor = "#d9d9d9";                              // non-focused routes become light grey
+  var RouteDimOpacity = 0.5;
 
   // Station mode (shown while "Internet Connection" is selected)
   var LeftMargin = 140;          // px gap from the left screen edge to the first station
@@ -763,6 +765,8 @@
   // Plan/3D highlight are about. Only one line is focused at a time; clicking the focused
   // button again clears the focus.
   var activeRouteId = null;
+  var subwayCameraSelectionVersion = 0;
+  var subwayCameraFocusedVersions = { plan: null, "3d": null };
   var subwayRouteButtons = {};   // route id -> its pill element, so focus can restyle them all
 
   function makeRouteButton(route) {
@@ -800,6 +804,7 @@
   // rebuild the station dot row, redraw Section View, and highlight it on Plan/3D.
   function setActiveRoute(routeId) {
     activeRouteId = routeId;
+    subwayCameraSelectionVersion += 1;
     Object.keys(subwayRouteButtons).forEach(function (id) {
       subwayRouteButtons[id].classList.toggle("active-flight", id === activeRouteId);
     });
@@ -812,6 +817,9 @@
     renderStationDotRow();
     draw();
     syncActiveRouteHighlight();
+    if (selectedSubwayCameraRouteId()) {
+      window.setTimeout(function () { focusSelectedSubwayRoute(currentMapViewMode()); }, 0);
+    }
   }
 
   // ---- Shared data loads for the focused line ----
@@ -888,6 +896,7 @@
       subwayRouteIds().forEach(function (routeId) {
         setRouteHighlighted(routeId, routeId === activeRouteId || routeId === selectedTrainRouteId);
       });
+      syncPlanRouteFocusStyles();
     }
     syncActiveStationDots();
     // 3D View draws its subway lines as deck.gl layers, so focus travels by broadcast.
@@ -2046,6 +2055,7 @@
     var nextIcao24 = flight && flight.icao24 ? String(flight.icao24).toLowerCase() : null;
     if (previousIcao24 !== nextIcao24) resetActiveSectionSignal();
     activeSectionFlight = flight || null;
+    syncPlanRouteFocusStyles();
     if (activeSectionFlight && activeSectionFlight.signal_v2) {
       activeSectionLiveSignal = activeSectionFlight.signal_v2.live_current ||
         activeSectionFlight.signal_v2.current || null;
@@ -2444,6 +2454,7 @@
       loadSpindleData();        // idempotent -- also called from 3D View's load handler, whichever runs first wins
       applyBasemapHidden(planMap, "plan");   // picks up "Hide map" if it was toggled before this map existed
       document.dispatchEvent(new CustomEvent("platform:plan-map-ready"));
+      focusSelectedSubwayRoute("plan");
     });
   }
 
@@ -2462,6 +2473,7 @@
         routeGeoJsonById[r.id] = fc.features[0];
         syncRouteLayer(r.id);
         syncThreeDRouteLayer(r.id);
+        if (selectedSubwayCameraRouteId() === r.id) focusSelectedSubwayRoute(currentMapViewMode());
       })
       .catch(function () { /* route shape unavailable */ });
   });
@@ -2515,6 +2527,7 @@
       removeGeoJsonLayer(layerId);
       routeLayerOnById[routeId] = false;
     }
+    syncPlanRouteFocusStyles();
     bringSubwayToFront();   // keep subway lines above anything else layered on afterward
   }
   function syncAllRouteLayers() {
@@ -2630,11 +2643,29 @@
     planMap.setPaintProperty(casingId, "line-width", highlighted ? SubwayOutlineWeightSelected : SubwayOutlineWeight);
     planMap.setPaintProperty(layerId, "line-width", highlighted ? SubwayLineWeightSelected : SubwayLineWeight);
   }
+
+  function syncPlanRouteFocusStyles() {
+    if (!planMapReady) return;
+    var hasFocus = !!(activeSectionFlight || activeRouteId || selectedTrainRouteId);
+    subwayRouteIds().forEach(function (routeId) {
+      var layerId = "route-" + routeId;
+      var casingId = layerId + "-casing";
+      if (!planMap.getLayer(layerId) || !planMap.getLayer(casingId)) return;
+      var route = routes.filter(function (item) { return item.id === routeId; })[0];
+      var selected = routeId === activeRouteId || routeId === selectedTrainRouteId;
+      var dimmed = hasFocus && !selected;
+      planMap.setPaintProperty(layerId, "line-color", dimmed ? RouteDimColor : route.color);
+      planMap.setPaintProperty(layerId, "line-opacity", dimmed ? RouteDimOpacity : 1);
+      planMap.setPaintProperty(casingId, "line-color", dimmed ? RouteDimColor : SubwayOutlineColor);
+      planMap.setPaintProperty(casingId, "line-opacity", dimmed ? RouteDimOpacity : 1);
+    });
+  }
   window.PlanView = {
     getMap: function () { return planMap; },
     addGeoJsonPolyline: addGeoJsonPolyline,
     removeGeoJsonLayer: removeGeoJsonLayer,
     bringSubwayToFront: bringSubwayToFront,
+    syncRouteFocusStyles: syncPlanRouteFocusStyles,
     reprojectGeoJson: reprojectGeoJson   // exposed in case a caller needs the converted data itself
   };
   // ==============================================================
@@ -2704,6 +2735,7 @@
       loadSpindleData();
       applyBasemapHidden(threeDMap, "3d");   // picks up "Hide map" if it was toggled before this map existed
       document.dispatchEvent(new CustomEvent("platform:three-d-map-ready"));
+      focusSelectedSubwayRoute("3d");
     });
   }
 
@@ -2722,6 +2754,91 @@
     } else if (preset === "reset") {
       threeDMap.flyTo(Object.assign({ duration: 1200 }, ThreeDInitialCamera));
     }
+  }
+
+  function currentMapViewMode() {
+    var mode = document.body.getAttribute("data-view-mode");
+    return mode === "plan" || mode === "3d" ? mode : null;
+  }
+
+  function routeCoordinatePairs(geojson, pairs) {
+    pairs = pairs || [];
+    if (!geojson) return pairs;
+    if (geojson.type === "FeatureCollection") {
+      (geojson.features || []).forEach(function (feature) { routeCoordinatePairs(feature, pairs); });
+    } else if (geojson.type === "Feature") {
+      routeCoordinatePairs(geojson.geometry, pairs);
+    } else if (geojson.type === "LineString") {
+      (geojson.coordinates || []).forEach(function (coordinate) { pairs.push(coordinate); });
+    } else if (geojson.type === "MultiLineString") {
+      (geojson.coordinates || []).forEach(function (line) {
+        line.forEach(function (coordinate) { pairs.push(coordinate); });
+      });
+    }
+    return pairs;
+  }
+
+  function subwayRouteCameraData(routeId, mode) {
+    var feature = mode === "3d" && routeGeoJson3DById[routeId]
+      ? routeGeoJson3DById[routeId]
+      : (routeGeoJsonById[routeId] ? reprojectGeoJson(routeGeoJsonById[routeId]) : null);
+    var coordinates = routeCoordinatePairs(feature);
+    if (coordinates.length < 2) return null;
+    var west = Infinity;
+    var south = Infinity;
+    var east = -Infinity;
+    var north = -Infinity;
+    coordinates.forEach(function (coordinate) {
+      west = Math.min(west, Number(coordinate[0]));
+      south = Math.min(south, Number(coordinate[1]));
+      east = Math.max(east, Number(coordinate[0]));
+      north = Math.max(north, Number(coordinate[1]));
+    });
+    var start = coordinates[0];
+    var end = coordinates[coordinates.length - 1];
+    var lat1 = Number(start[1]) * Math.PI / 180;
+    var lat2 = Number(end[1]) * Math.PI / 180;
+    var longitudeDelta = (Number(end[0]) - Number(start[0])) * Math.PI / 180;
+    var y = Math.sin(longitudeDelta) * Math.cos(lat2);
+    var x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(longitudeDelta);
+    return {
+      bounds: [[west, south], [east, north]],
+      bearing: (Math.atan2(y, x) * 180 / Math.PI + 360) % 360
+    };
+  }
+
+  function subwayRouteCameraPadding(map) {
+    var width = map.getContainer().clientWidth || window.innerWidth;
+    return width >= 1100
+      ? { top: 140, right: 410, bottom: 100, left: 370 }
+      : { top: 100, right: 45, bottom: 90, left: 45 };
+  }
+
+  function selectedSubwayCameraRouteId() {
+    return selectedTrainRouteId || activeRouteId;
+  }
+
+  function focusSelectedSubwayRoute(mode, force) {
+    var routeId = selectedSubwayCameraRouteId();
+    if (!routeId || (mode !== "plan" && mode !== "3d")) return false;
+    if (!force && subwayCameraFocusedVersions[mode] === subwayCameraSelectionVersion) return true;
+    var map = mode === "3d" ? threeDMap : planMap;
+    var ready = mode === "3d" ? threeDMapReady : planMapReady;
+    if (!map || !ready || !map.isStyleLoaded() || map.getContainer().clientWidth === 0) return false;
+    var camera = subwayRouteCameraData(routeId, mode);
+    if (!camera) return false;
+    var options = {
+      padding: subwayRouteCameraPadding(map),
+      maxZoom: mode === "3d" ? 15 : 15.5,
+      duration: 1100
+    };
+    if (mode === "3d") {
+      options.pitch = 65;
+      options.bearing = camera.bearing;
+    }
+    map.fitBounds(camera.bounds, options);
+    subwayCameraFocusedVersions[mode] = subwayCameraSelectionVersion;
+    return true;
   }
 
   document.getElementById("threeD-camera-tools").addEventListener("click", function (event) {
@@ -2869,6 +2986,7 @@
     selectedTrainTripId = p.tripId;
     var previousRouteId = selectedTrainRouteId;
     selectedTrainRouteId = p.route;
+    subwayCameraSelectionVersion += 1;
     // Synchronous: integrated-flight-tracker.js's listener runs and clears any
     // selected flight (closing the panel) before the lines below reopen it for this train.
     document.dispatchEvent(new CustomEvent("platform:train-selected", { detail: { tripId: p.tripId, route: p.route } }));
@@ -2877,7 +2995,9 @@
     trainDetailsPanel.setAttribute("aria-hidden", "false");
     if (previousRouteId && previousRouteId !== selectedTrainRouteId) setRouteHighlighted(previousRouteId, false);
     setRouteHighlighted(selectedTrainRouteId, true);
+    syncPlanRouteFocusStyles();
     renderTrains();   // refresh the highlighted-dot state immediately
+    window.setTimeout(function () { focusSelectedSubwayRoute(currentMapViewMode()); }, 0);
   }
 
   function closeTrainDetails() {
@@ -2885,6 +3005,8 @@
     selectedTrainTripId = null;
     if (selectedTrainRouteId) setRouteHighlighted(selectedTrainRouteId, false);
     selectedTrainRouteId = null;
+    subwayCameraSelectionVersion += 1;
+    syncPlanRouteFocusStyles();
     trainDetailsPanel.classList.remove("open");
     trainDetailsPanel.setAttribute("aria-hidden", "true");
     document.dispatchEvent(new CustomEvent("platform:train-deselected"));
@@ -3743,6 +3865,9 @@
       draw();
     }
     document.dispatchEvent(new CustomEvent("platform:view-changed", { detail: { mode: mode } }));
+    if (selectedSubwayCameraRouteId() && (mode === "plan" || mode === "3d")) {
+      window.setTimeout(function () { focusSelectedSubwayRoute(mode); }, 0);
+    }
   }
 
   btnPlanView.addEventListener("click", function () { setViewMode("plan"); });
