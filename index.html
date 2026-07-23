@@ -192,6 +192,17 @@
     background: var(--theme1-mid, #72a391);
     color: #ffffff;
   }
+  #section-signal-layout [hidden] { display: none !important; }
+  .section-signal-layout-description {
+    flex: 0 0 auto;
+    border-radius: 8px;
+    padding: 7px 9px;
+    background: var(--theme1-mid, #72a391);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
+  }
 
   /* The music panel is a sibling of the Section SVG, so draw() can rebuild the existing
      route/signal groups without ever replacing the audio controls or waveform. */
@@ -527,6 +538,7 @@
         <div id="section-signal-layout" role="group" aria-label="Signal visualization layout">
           <button type="button" data-signal-layout="along-route" aria-pressed="false">Along Route</button>
           <button type="button" data-signal-layout="separate-plot" aria-pressed="true">Separate Plot</button>
+          <span class="section-signal-layout-description" hidden>Separate Plot</span>
         </div>
 
         <div class="panel collapsed">
@@ -816,6 +828,9 @@
   var sectionSignalLayoutButtons = Array.prototype.slice.call(
     sectionSignalLayoutControl.querySelectorAll("button[data-signal-layout]")
   );
+  var sectionSignalLayoutDescription = sectionSignalLayoutControl.querySelector(
+    ".section-signal-layout-description"
+  );
   var activeSectionFlight = null;
   var sectionOverviewFlights = [];
   var activeSectionSignalHistory = [];
@@ -887,6 +902,16 @@
       setSectionSignalLayout(button.getAttribute("data-signal-layout"));
     });
   });
+
+  function syncSectionSignalLayoutControl() {
+    var sectionOverviewActive = !activeRouteId && !activeSectionFlight;
+    var subwayRouteSelected = Boolean(activeRouteId);
+    sectionSignalLayoutControl.style.display = sectionOverviewActive ? "none" : "";
+    sectionSignalLayoutButtons.forEach(function (button) {
+      button.hidden = subwayRouteSelected;
+    });
+    sectionSignalLayoutDescription.hidden = !subwayRouteSelected;
+  }
 
   // ----- Build route buttons -----
   // The focused subway line. This is FOCUS, not visibility: every route's line stays drawn
@@ -2492,7 +2517,7 @@
     var groundTop = h * (activeRouteId ? SubwayFocusGroundLocation : GroundLocation);
 
     var sectionOverviewActive = !activeRouteId && !activeSectionFlight;
-    sectionSignalLayoutControl.style.display = sectionOverviewActive ? "none" : "";
+    syncSectionSignalLayoutControl();
     legend.classList.remove("on");
     var svgW = w;
 
