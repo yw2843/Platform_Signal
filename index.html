@@ -447,10 +447,11 @@
           <div class="panel-header" role="button" tabindex="0" aria-expanded="false">Data Filters</div>
           <div class="panel-box filter-groups">
             <div class="group-label">Flight status</div>
-            <div class="filter-options" id="flight-status-filter">
-              <button class="filter-option selected" type="button" data-value="all">All</button>
-              <button class="filter-option" type="button" data-value="confirmed">Confirmed</button>
-              <button class="filter-option" type="button" data-value="probable">Probable</button>
+            <div class="filter-options" id="flight-status-filter" role="group" aria-label="Flight status visibility">
+              <button class="filter-option selected" type="button" data-value="all" aria-pressed="true">All</button>
+              <button class="filter-option selected" type="button" data-value="confirmed" aria-pressed="true">Confirmed</button>
+              <button class="filter-option selected" type="button" data-value="probable" aria-pressed="true">Probable</button>
+              <button class="filter-option selected" type="button" data-value="no-current" aria-pressed="true">No Current</button>
             </div>
             <div class="group-label">Direction</div>
             <div class="filter-options" id="flight-direction-filter">
@@ -549,13 +550,13 @@
     </div>
   </div>
 
-  <aside class="details-panel" id="details-panel" aria-hidden="true" aria-label="Selected flight details">
+  <aside class="details-panel" id="details-panel" aria-hidden="true" aria-label="Selected item details">
     <div class="details-header">
       <div>
         <span class="eyebrow" id="details-status">Selected flight</span>
         <h2 id="details-callsign">--</h2>
       </div>
-      <button id="details-close" class="close-button" type="button" aria-label="Close flight details">&times;</button>
+      <button id="details-close" class="close-button" type="button" aria-label="Close details">&times;</button>
     </div>
     <div class="details-route" id="details-route">--</div>
     <table class="details-table"><tbody id="details-body"></tbody></table>
@@ -718,6 +719,7 @@
     sectionSignalLayoutControl.querySelectorAll("button[data-signal-layout]")
   );
   var activeSectionFlight = null;
+  var sectionOverviewFlights = [];
   var activeSectionSignalHistory = [];
   var activeSectionProvisionalSignals = [];
   var activeSectionSignalSince = null;
@@ -733,6 +735,14 @@
     "120.4": "#ef7d32",
     "120.8": "#8b5cf6",
     "121.7": "#18a36f"
+  };
+
+  // The flight tracker owns the live/filter state. This narrow bridge gives the default
+  // Section overview only the already-filtered flight objects it needs for altitude paths;
+  // it does not request or merge signal history for unselected flights.
+  window.setSectionOverviewFlights = function (flights) {
+    sectionOverviewFlights = Array.isArray(flights) ? flights.slice() : [];
+    if (!activeSectionFlight && !activeRouteId) draw();
   };
   var sectionAudioPanel = document.getElementById("section-audio-panel");
   var sectionAudioElement = document.getElementById("section-audio");
@@ -832,6 +842,7 @@
   // Focusing a line highlights it, shows its signal tube, rebuilds the station dot row,
   // redraws Section View, and highlights it on Plan/3D.
   function setActiveRoute(routeId) {
+    var previousRouteId = activeRouteId;
     // Route focus and train selection are mutually exclusive. Close the train first so
     // its details, selected dot, and local signal segment cannot survive underneath the
     // whole-route focus that is about to take ownership.
@@ -860,6 +871,8 @@
     renderStationDotRow();
     draw();
     syncActiveRouteHighlight();
+    if (activeRouteId) renderSubwayRouteDetails(activeRouteId);
+    else if (previousRouteId) closeSubwayRouteDetails();
     if (activeRouteId) requestSubwayCameraFocus(currentMapViewMode());
     return signalPromise;
   }
@@ -1825,6 +1838,216 @@
       if (window.console && console.warn) console.warn("Section music waveform unavailable:", error);
     });
 
+  // Default Section overview: all currently visible flight altitude tracks plus every
+  // supported subway height profile. The two bands deliberately use independent vertical
+  // scales so tens of feet of subway variation remain legible beside aircraft altitudes.
+  // Signal history is selected-route-only and is never drawn or fetched by this renderer.
+  function renderSectionOverview(w, chartBottom) {
+    var detailsOpen = document.getElementById("details-panel").classList.contains("open");
+    var plotLeft = Math.min(120, Math.max(92, w * 0.07));
+    var plotRight = Math.max(plotLeft + 240, w - (detailsOpen ? 430 : 80));
+    var plotTop = 150;
+    var plotBottom = Math.max(plotTop + 260, Number.isFinite(chartBottom) ? chartBottom : window.innerHeight - 70);
+    var plotWidth = plotRight - plotLeft;
+    var availableHeight = plotBottom - plotTop;
+    var flightBottom = plotTop + availableHeight * 0.56;
+    var subwayTop = flightBottom + Math.min(48, availableHeight * 0.13);
+    var subwayBottom = plotBottom;
+    var markup = '';
+
+    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 54) + '" font-size="16" font-weight="700">' +
+      'All active routes &middot; height overview</text>';
+    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 32) + '" font-size="12">' +
+      'Click a flight or subway line to open its existing detailed Section view. Signal appears after selection.</text>';
+
+    var flightSeries = sectionOverviewFlights.map(function (flight) {
+      var points = ((flight && flight.track) || []).filter(function (point) {
+        return Number.isFinite(Number(point.latitude)) && Number.isFinite(Number(point.longitude)) &&
+          (Number.isFinite(Number(point.altitude_ft)) || Number.isFinite(Number(point.altitude_m)));
+      }).slice().sort(function (a, b) {
+        return Number(a.timestamp) - Number(b.timestamp);
+      });
+      if (points.length < 2) return null;
+      var cumulative = [0];
+      for (var i = 1; i < points.length; i++) {
+        cumulative.push(cumulative[i - 1] + flightDistanceNm(points[i - 1], points[i]));
+      }
+      return {
+        flight: flight,
+        points: points,
+        cumulative: cumulative,
+        distanceNm: cumulative[cumulative.length - 1],
+        altitudes: points.map(function (point) {
+          return Number.isFinite(Number(point.altitude_ft))
+            ? Math.max(0, Number(point.altitude_ft))
+            : Math.max(0, Number(point.altitude_m) * 3.28084);
+        })
+      };
+    }).filter(Boolean);
+    var maxFlightDistance = Math.max.apply(null, flightSeries.map(function (series) {
+      return series.distanceNm;
+    }).concat([0.1]));
+    var maxFlightAltitude = Math.max.apply(null, flightSeries.reduce(function (values, series) {
+      return values.concat(series.altitudes);
+    }, []).concat([1000]));
+    maxFlightAltitude = Math.ceil(maxFlightAltitude / 1000) * 1000;
+    function flightY(altitude) {
+      return flightBottom - altitude / maxFlightAltitude * (flightBottom - plotTop);
+    }
+
+    for (var flightLevel = 0; flightLevel <= 3; flightLevel++) {
+      var altitudeTick = maxFlightAltitude * flightLevel / 3;
+      var altitudeY = flightY(altitudeTick);
+      markup += '<line x1="' + plotLeft + '" y1="' + altitudeY.toFixed(1) + '" x2="' + plotRight +
+        '" y2="' + altitudeY.toFixed(1) + '" stroke="#bfc8ce" stroke-width="1" stroke-dasharray="4 5"></line>';
+      markup += '<text x="' + (plotLeft - 10) + '" y="' + (altitudeY + 4).toFixed(1) +
+        '" text-anchor="end" font-size="11">' + Math.round(altitudeTick).toLocaleString() + ' ft</text>';
+    }
+    markup += '<text x="' + plotLeft + '" y="' + (plotTop - 10) +
+      '" font-size="12" font-weight="700">Flights &middot; altitude above mean sea level</text>';
+
+    if (!flightSeries.length) {
+      markup += '<text x="' + plotLeft + '" y="' + (plotTop + 34) +
+        '" font-size="12">Waiting for visible flight tracks that match the current filters.</text>';
+    }
+    flightSeries.forEach(function (series) {
+      var flight = series.flight;
+      var color = flight.status === "confirmed" ? "#2ed47a" : "#f5a623";
+      var dash = flight.status === "probable" ? ' stroke-dasharray="7 5"' : '';
+      var points = series.points.map(function (point, index) {
+        var x = plotLeft + series.cumulative[index] / maxFlightDistance * plotWidth;
+        return x.toFixed(1) + ',' + flightY(series.altitudes[index]).toFixed(1);
+      }).join(' ');
+      var id = escapeSectionText(String(flight.icao24 || '').toLowerCase());
+      var label = escapeSectionText(flight.callsign || String(flight.icao24 || '').toUpperCase());
+      var lastX = plotLeft + series.distanceNm / maxFlightDistance * plotWidth;
+      var lastY = flightY(series.altitudes[series.altitudes.length - 1]);
+      markup += '<polyline points="' + points + '" fill="none" stroke="' + color +
+        '" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" opacity="0.82"' + dash + '></polyline>';
+      markup += '<polyline class="section-overview-hit" data-section-overview-kind="flight" data-section-overview-id="' +
+        id + '" points="' + points + '" fill="none" stroke="transparent" stroke-width="16" pointer-events="stroke"' +
+        ' tabindex="0" role="button" aria-label="Select flight ' + label + '" style="cursor:pointer"><title>' +
+        label + ' &middot; click to select</title></polyline>';
+      markup += '<circle cx="' + lastX.toFixed(1) + '" cy="' + lastY.toFixed(1) +
+        '" r="4" fill="' + color + '" stroke="#ffffff" stroke-width="1.5" pointer-events="none"></circle>';
+      markup += '<text x="' + Math.min(plotRight - 4, lastX + 7).toFixed(1) + '" y="' +
+        (lastY - 7).toFixed(1) + '" text-anchor="end" font-size="10" pointer-events="none">' + label + '</text>';
+    });
+    markup += '<text x="' + plotRight + '" y="' + (flightBottom + 20) +
+      '" text-anchor="end" font-size="10">Shared cumulative flight distance scale &middot; ' +
+      maxFlightDistance.toFixed(1) + ' NM</text>';
+
+    var elevationProfiles = typeof routeElevationProfileById === "object" && routeElevationProfileById
+      ? routeElevationProfileById
+      : {};
+    var subwaySeries = routes.filter(function (route) {
+      return route.type === "subway" && selectedRoutes[route.id] &&
+        Array.isArray(elevationProfiles[route.id]) && elevationProfiles[route.id].length > 1;
+    }).map(function (route) {
+      var profile = elevationProfiles[route.id];
+      return {
+        route: route,
+        profile: profile,
+        distanceMiles: Number(profile[profile.length - 1].dist_along_route_m || 0) * 0.000621371,
+        heights: profile.map(function (point) {
+          return -(Number(point.depth_below_surface_m) || 0) * SubwayMetersToFeet;
+        })
+      };
+    });
+    var allSubwayHeights = subwaySeries.reduce(function (values, series) {
+      return values.concat(series.heights);
+    }, []);
+    var minSubwayHeight = Math.min.apply(null, allSubwayHeights.concat([0]));
+    var maxSubwayHeight = Math.max.apply(null, allSubwayHeights.concat([0]));
+    if (maxSubwayHeight - minSubwayHeight < 20) {
+      minSubwayHeight -= 10;
+      maxSubwayHeight += 10;
+    } else {
+      var subwayPadding = (maxSubwayHeight - minSubwayHeight) * 0.08;
+      minSubwayHeight -= subwayPadding;
+      maxSubwayHeight += subwayPadding;
+    }
+    var maxSubwayDistance = Math.max.apply(null, subwaySeries.map(function (series) {
+      return series.distanceMiles;
+    }).concat([0.1]));
+    function subwayY(heightFt) {
+      return subwayBottom - (heightFt - minSubwayHeight) /
+        (maxSubwayHeight - minSubwayHeight) * (subwayBottom - subwayTop);
+    }
+
+    markup += '<text x="' + plotLeft + '" y="' + (subwayTop - 12) +
+      '" font-size="12" font-weight="700">Subways &middot; track height relative to street</text>';
+    var subwayTicks = [minSubwayHeight, 0, maxSubwayHeight].filter(function (value, index, values) {
+      return values.findIndex(function (other) { return Math.abs(other - value) < 0.01; }) === index;
+    });
+    subwayTicks.forEach(function (heightTick) {
+      var heightY = subwayY(heightTick);
+      var tickLabel = Math.abs(heightTick) < 0.01 ? 'street' :
+        (heightTick > 0 ? '+' : '') + Math.round(heightTick) + ' ft';
+      markup += '<line x1="' + plotLeft + '" y1="' + heightY.toFixed(1) + '" x2="' + plotRight +
+        '" y2="' + heightY.toFixed(1) + '" stroke="' + (Math.abs(heightTick) < 0.01 ? '#f2f2f2' : '#3a4a5c') +
+        '" stroke-width="' + (Math.abs(heightTick) < 0.01 ? '2' : '1') + '" stroke-dasharray="4 5"></line>';
+      markup += '<text x="' + (plotLeft - 10) + '" y="' + (heightY + 4).toFixed(1) +
+        '" text-anchor="end" font-size="11">' + tickLabel + '</text>';
+    });
+
+    if (!subwaySeries.length) {
+      markup += '<text x="' + plotLeft + '" y="' + (subwayTop + 28) +
+        '" font-size="12">Loading supported subway elevation profiles...</text>';
+    }
+    subwaySeries.forEach(function (series) {
+      var route = series.route;
+      var points = series.profile.map(function (point, index) {
+        var distanceMiles = Number(point.dist_along_route_m || 0) * 0.000621371;
+        var x = plotLeft + distanceMiles / maxSubwayDistance * plotWidth;
+        return x.toFixed(1) + ',' + subwayY(series.heights[index]).toFixed(1);
+      }).join(' ');
+      var routeId = escapeSectionText(route.id);
+      var routeLabel = escapeSectionText(route.label || route.id);
+      var endX = plotLeft + series.distanceMiles / maxSubwayDistance * plotWidth;
+      var endY = subwayY(series.heights[series.heights.length - 1]);
+      markup += '<polyline points="' + points + '" fill="none" stroke="' + route.color +
+        '" stroke-width="4" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"></polyline>';
+      markup += '<polyline class="section-overview-hit" data-section-overview-kind="subway-route" data-section-overview-id="' +
+        routeId + '" points="' + points + '" fill="none" stroke="transparent" stroke-width="18" pointer-events="stroke"' +
+        ' tabindex="0" role="button" aria-label="Select subway route ' + routeLabel + '" style="cursor:pointer"><title>' +
+        routeLabel + ' &middot; click to select</title></polyline>';
+      markup += '<text x="' + Math.min(plotRight - 4, endX + 7).toFixed(1) + '" y="' +
+        (endY - 8).toFixed(1) + '" text-anchor="end" font-size="11" font-weight="700" pointer-events="none">' +
+        routeLabel + '</text>';
+    });
+    markup += '<text x="' + plotRight + '" y="' + (subwayBottom + 20) +
+      '" text-anchor="end" font-size="10">Shared cumulative subway distance scale &middot; ' +
+      maxSubwayDistance.toFixed(1) + ' mi</text>';
+    return markup;
+  }
+
+  function activateSectionOverviewTarget(target) {
+    if (!target || activeSectionFlight || activeRouteId) return false;
+    var kind = target.getAttribute("data-section-overview-kind");
+    var targetId = target.getAttribute("data-section-overview-id");
+    if (kind === "flight" && window.PlatformFlightDisplay &&
+        typeof window.PlatformFlightDisplay.select === "function") {
+      return window.PlatformFlightDisplay.select(targetId);
+    }
+    if (kind === "subway-route") return toggleActiveSubwayRoute(targetId);
+    return false;
+  }
+
+  svg.addEventListener("click", function (event) {
+    var target = event.target && typeof event.target.closest === "function"
+      ? event.target.closest("[data-section-overview-kind]")
+      : null;
+    activateSectionOverviewTarget(target);
+  });
+  svg.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    var target = event.target && typeof event.target.closest === "function"
+      ? event.target.closest("[data-section-overview-kind]")
+      : null;
+    if (activateSectionOverviewTarget(target)) event.preventDefault();
+  });
+
   // Straighten the ground track from left to right while preserving altitude. The observed
   // route remains the baseline; a separate path-normal waveform shows modeled signal change.
   function renderFlightAltitudeProfile(w, groundTop, chartBottom) {
@@ -2170,7 +2393,8 @@
     // charts retain the existing 2/3 layout reference without drawing a ground surface.
     var groundTop = h * (activeRouteId ? SubwayFocusGroundLocation : GroundLocation);
 
-    // The unselected Section View is intentionally empty until a later default is supplied.
+    var sectionOverviewActive = !activeRouteId && !activeSectionFlight;
+    sectionSignalLayoutControl.style.display = sectionOverviewActive ? "none" : "";
     legend.classList.remove("on");
     var svgW = w;
 
@@ -2184,8 +2408,11 @@
     groundLine.setAttribute("y2", groundTop);
     groundLine.style.display = activeRouteId ? "" : "none";
 
-    // Only a focused subway route owns this layer; otherwise it remains empty.
-    routeLines.innerHTML = activeRouteId ? renderSubwayProfile(w, h, groundTop, sectionChartBottom) : "";
+    // A focused subway route keeps its existing detailed profile. With no selection, this
+    // same layer becomes a height-only overview of all visible flights and subway routes.
+    routeLines.innerHTML = activeRouteId
+      ? renderSubwayProfile(w, h, groundTop, sectionChartBottom)
+      : (sectionOverviewActive ? renderSectionOverview(w, sectionChartBottom) : "");
     // Requirement: focusing a subway line hides every flight diagram in Section View.
     flightProfile.innerHTML = activeRouteId ? "" : renderFlightAltitudeProfile(w, groundTop, sectionChartBottom);
     refreshSectionAudioEnvelope(false);
@@ -2443,7 +2670,7 @@
   var btnHideMap = document.getElementById("btn-hide-map");
 
   // Native fullscreen only renders the selected element and its descendants. The shared
-  // flight/train details panel normally lives beside the three view containers so it works
+  // flight/train/route details panel normally lives beside the three view containers so it works
   // in Plan, 3D, and Section views. Move that same node into the 3D container only while it
   // is fullscreen, then restore its exact DOM position on exit. Moving the node preserves
   // its selection state, live content, close-button listeners, and accessibility attributes.
@@ -3093,13 +3320,72 @@
     return trainStopsPromise;
   }
 
-  // Clicking a live train shows its details in the same side panel used for flights
+  // Route focus and live-train selection share the same details panel used for flights.
+  // Clicking a live train shows its details there
   // (rather than a maplibregl.Popup), and highlights that train as a larger white dot
   // via the "selected" property baked into its GeoJSON feature (see trainsToGeoJSON).
-  // Selecting a train deselects any selected flight, and vice versa (see the
-  // "platform:flight-selected" listener below), so at most one of the two side panels'
-  // worth of content -- flight or train -- is ever shown at a time.
+  // Selecting a train deselects any selected flight or whole route, and vice versa, so
+  // only one owner -- flight, train, or subway route -- populates the panel at a time.
   var trainDetailsPanel = document.getElementById("details-panel");
+
+  function subwayRouteDetailsRows(routeId) {
+    var stations = subwaySignalJson && subwaySignalJson.stationNames
+      ? subwaySignalJson.stationNames[routeId]
+      : null;
+    var trains = lastFetchedTrainsByRoute[routeId];
+    return [
+      ["Line", routeId],
+      ["Selection", "Whole route"],
+      ["Stations", stations ? String(stations.length) : "Loading..."],
+      ["Live trains", Array.isArray(trains) ? String(trains.length) : "Waiting for feed..."]
+    ];
+  }
+
+  function renderSubwayRouteDetails(routeId) {
+    var route = routes.filter(function (item) { return item.id === routeId; })[0];
+    if (!route || activeRouteId !== routeId) return;
+    var color = route.color || NA;
+    var statusEl = document.getElementById("details-status");
+    statusEl.hidden = false;
+    statusEl.textContent = "Selected subway route";
+    statusEl.style.color = color;
+    document.getElementById("details-callsign").textContent = route.label + " Route";
+    var detailsRoute = document.getElementById("details-route");
+    detailsRoute.hidden = false;
+    detailsRoute.textContent = "Whole-route signal view";
+    var body = document.getElementById("details-body");
+    body.replaceChildren.apply(body, subwayRouteDetailsRows(routeId).map(function (row) {
+      var tr = document.createElement("tr");
+      var th = document.createElement("th");
+      th.scope = "row";
+      th.textContent = row[0];
+      var td = document.createElement("td");
+      td.textContent = row[1];
+      tr.append(th, td);
+      return tr;
+    }));
+    document.getElementById("details-note").textContent =
+      "This selection represents the entire route. Select an individual train for Trip ID and next-stop details. " +
+      "Live train positions use the MTA GTFS-Realtime feed, refreshed every 15s.";
+    trainDetailsPanel.dataset.detailsOwner = "subway-route";
+    trainDetailsPanel.classList.add("open");
+    trainDetailsPanel.setAttribute("aria-hidden", "false");
+
+    if (!subwaySignalJson) {
+      loadSubwaySignalJson().then(function () {
+        if (activeRouteId === routeId && trainDetailsPanel.dataset.detailsOwner === "subway-route") {
+          renderSubwayRouteDetails(routeId);
+        }
+      }).catch(function () { /* station count remains unavailable */ });
+    }
+  }
+
+  function closeSubwayRouteDetails() {
+    if (trainDetailsPanel.dataset.detailsOwner !== "subway-route") return;
+    delete trainDetailsPanel.dataset.detailsOwner;
+    trainDetailsPanel.classList.remove("open");
+    trainDetailsPanel.setAttribute("aria-hidden", "true");
+  }
 
   function renderTrainDetails(p) {
     var color = TrainColors[p.route] || NA;
@@ -3129,6 +3415,7 @@
     }));
     document.getElementById("details-note").textContent =
       "Position is drawn from the MTA GTFS-Realtime feed, refreshed every 15s.";
+    trainDetailsPanel.dataset.detailsOwner = "train";
   }
 
   function selectTrain(p, lonLat) {
@@ -3169,6 +3456,7 @@
     syncPlanRouteFocusStyles();
     trainDetailsPanel.classList.remove("open");
     trainDetailsPanel.setAttribute("aria-hidden", "true");
+    if (trainDetailsPanel.dataset.detailsOwner === "train") delete trainDetailsPanel.dataset.detailsOwner;
     document.dispatchEvent(new CustomEvent("platform:train-deselected"));
     if (activeSpindleTripId === closingTripId) {
       if (activeRouteId) activateSubwayRouteSignal(activeRouteId);
@@ -3180,9 +3468,22 @@
   document.addEventListener("platform:flight-selected", function () {
     if (selectedTrainTripId) closeTrainDetails();
   });
-  document.getElementById("details-close").addEventListener("click", closeTrainDetails);
+  function closeSelectedSubwayDetails() {
+    if (activeRouteId && trainDetailsPanel.dataset.detailsOwner === "subway-route") {
+      setActiveRoute(null);
+    } else {
+      closeTrainDetails();
+    }
+  }
+  document.getElementById("details-close").addEventListener("click", closeSelectedSubwayDetails);
   document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape") closeTrainDetails();
+    if (event.key === "Escape") closeSelectedSubwayDetails();
+  });
+
+  document.addEventListener("platform:subways-updated", function () {
+    if (activeRouteId && trainDetailsPanel.dataset.detailsOwner === "subway-route") {
+      renderSubwayRouteDetails(activeRouteId);
+    }
   });
 
   function initTrainsLayer() {

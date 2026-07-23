@@ -39,7 +39,7 @@
   var state = {
     flights: [],
     selectedIcao24: null,
-    statusFilter: "all",
+    statusVisibility: { confirmed: true, probable: true, noCurrent: true },
     directionFilter: "all",
     planOverlay: null,
     threeDOverlay: null,
@@ -263,9 +263,10 @@
   function filteredFlights() {
     return state.flights.filter(function (flight) {
       if (!flight.active) return false;
-      var statusMatches = state.statusFilter === "all" || flight.status === state.statusFilter;
+      var statusMatches = state.statusVisibility[flight.status] === true;
+      var signalMatches = hasCurrentModeledSignal(flight) || state.statusVisibility.noCurrent;
       var directionMatches = state.directionFilter === "all" || flight.direction === state.directionFilter;
-      return statusMatches && directionMatches;
+      return statusMatches && signalMatches && directionMatches;
     });
   }
 
@@ -609,6 +610,9 @@
 
   function renderFlightButtons() {
     var flights = filteredFlights();
+    if (typeof window.setSectionOverviewFlights === "function") {
+      window.setSectionOverviewFlights(flights);
+    }
     ui.flightPicker.replaceChildren();
     if (!flights.length) {
       var empty = document.createElement("span");
@@ -672,6 +676,7 @@
     resetSelectedSignalRoute();
     ui.detailsPanel.classList.remove("open");
     ui.detailsPanel.setAttribute("aria-hidden", "true");
+    if (ui.detailsPanel.dataset.detailsOwner === "flight") delete ui.detailsPanel.dataset.detailsOwner;
     renderFlightButtons();
     if (window.setActiveSectionFlight) window.setActiveSectionFlight(null);
     updateFlightLayers();
@@ -690,12 +695,17 @@
       showMessage(callsign + " is no longer live, so its signal route has been cleared.");
       return;
     }
+    if (!selectedFlightPassesFilters()) {
+      closeDetails();
+      return;
+    }
     renderDetails(flight);
     syncSelectedSignalRoute(flight, true);
     if (window.setActiveSectionFlight) window.setActiveSectionFlight(flight);
   }
 
   function renderDetails(flight) {
+    ui.detailsPanel.dataset.detailsOwner = "flight";
     var signal = flight.signal_v2
       ? (flight.signal_v2.live_current || flight.signal_v2.current)
       : null;
@@ -887,6 +897,12 @@
       finiteNumber(point && point.aircraft_lon) != null &&
       finiteNumber(point && point.aircraft_lat) != null &&
       finiteNumber(point && point.aircraft_altitude_m) != null;
+  }
+
+  function hasCurrentModeledSignal(flight) {
+    var signalV2 = flight && flight.signal_v2;
+    var current = signalV2 ? (signalV2.live_current || signalV2.current) : null;
+    return drawableSignalPoint(current);
   }
 
   function drawableSelectedSignalPoints() {
@@ -1355,6 +1371,58 @@
     });
   }
 
+  function statusVisibilityKey(value) {
+    return value === "no-current" ? "noCurrent" : value;
+  }
+
+  function allStatusesVisible() {
+    return state.statusVisibility.confirmed &&
+      state.statusVisibility.probable &&
+      state.statusVisibility.noCurrent;
+  }
+
+  function syncStatusFilterButtons() {
+    var allVisible = allStatusesVisible();
+    Array.prototype.forEach.call(ui.statusFilter.querySelectorAll("button[data-value]"), function (option) {
+      var value = option.getAttribute("data-value");
+      var selected = value === "all"
+        ? allVisible
+        : state.statusVisibility[statusVisibilityKey(value)] === true;
+      option.classList.toggle("selected", selected);
+      option.setAttribute("aria-pressed", String(selected));
+    });
+  }
+
+  function selectedFlightPassesFilters() {
+    if (!state.selectedIcao24) return true;
+    return filteredFlights().some(function (flight) {
+      return flight.icao24 === state.selectedIcao24;
+    });
+  }
+
+  function bindStatusFilter() {
+    ui.statusFilter.addEventListener("click", function (event) {
+      var button = event.target.closest("button[data-value]");
+      if (!button) return;
+      var value = button.getAttribute("data-value");
+      if (value === "all") {
+        state.statusVisibility.confirmed = true;
+        state.statusVisibility.probable = true;
+        state.statusVisibility.noCurrent = true;
+      } else {
+        var key = statusVisibilityKey(value);
+        state.statusVisibility[key] = !state.statusVisibility[key];
+      }
+      syncStatusFilterButtons();
+      if (!selectedFlightPassesFilters()) {
+        closeDetails();
+        return;
+      }
+      renderFlightButtons();
+      updateFlightLayers();
+    });
+  }
+
   function circleFeature(longitude, latitude, radiusNm, steps) {
     var coordinates = [];
     var angularDistance = radiusNm / 3440.065;
@@ -1474,7 +1542,7 @@
     updateFlightLayers();
   });
 
-  bindFilter(ui.statusFilter, "statusFilter");
+  bindStatusFilter();
   bindFilter(ui.directionFilter, "directionFilter");
   ui.detailsClose.addEventListener("click", closeDetails);
   document.addEventListener("keydown", function (event) {
